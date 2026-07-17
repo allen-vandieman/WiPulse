@@ -1,0 +1,331 @@
+/*
+ * ESP32 CSI Traffic Generator with BLE control panel
+ *
+ * BLE lets you toggle the WiFi AP on/off, start/stop ping broadcasting,
+ * and adjust broadcast speed — all over Bluetooth, independent of WiFi
+ * state (handy since turning WiFi off would normally kill any WiFi-based
+ * control/debug channel).
+ *
+ * Connect with any BLE serial terminal app (e.g. "Serial Bluetooth Terminal"
+ * on Android, or nRF Connect / LightBlue on iOS) and send single-character
+ * commands as described in the menu.
+ */
+
+#include <WiFi.h>
+#include <WiFiUdp.h>
+#include "esp_wifi.h"
+#include <HardwareBLESerial.h>
+
+// ---- WiFi AP Configuration ----
+const char* AP_SSID     = "WiPulse_AP";
+const char* AP_PASSWORD = "csi12345";
+const int   AP_CHANNEL  = 6;
+const int   UDP_PORT    = 5500;
+
+IPAddress piIP(192, 168, 4, 2); // update to Pi's actual AP-assigned IP
+
+// ---- State ----
+bool wifiOn        = false;
+bool broadcasting  = false;
+unsigned long broadcastIntervalMs = 100; // default 10 Hz
+unsigned long lastPing = 0;
+uint32_t seq = 0;
+
+WiFiUDP udp;
+HardwareBLESerial &bleSerial = HardwareBLESerial::getInstance();
+
+struct PendingPing {
+  uint32_t seq;
+  uint64_t sendTimeUs;
+  bool inUse;
+};
+const int PENDING_SIZE = 64;
+PendingPing pending[PENDING_SIZE];
+
+// Forward declarations
+void printMenu();
+void printStatus();
+void handleCommand(char c);
+void applyFrequencyInput(const String &input);
+void setWifi(bool on);
+void toggleBroadcast();
+void adjustSpeed(float multiplier);
+void sendBLE(const String &msg);
+void sendPing();
+void checkForAck();
+void clearBuffer();
+
+void setup() {
+  Serial.begin(115200);
+  delay(300);
+
+  for (int i = 0; i < PENDING_SIZE; i++) pending[i].inUse = false;
+
+  if (!bleSerial.beginAndSetupBLE("WiPulse_CSI_Ctrl")) {
+    Serial.println("BLE init failed!");
+  } else {
+    Serial.println("BLE ready. Connect with a BLE serial app.");
+  }
+
+  printMenu();
+}
+
+void loop() {
+  bleSerial.poll();
+
+  // Handle incoming BLE commands
+  while (bleSerial.available()) {
+    char c = bleSerial.read();
+    handleCommand(c);
+  }
+
+  if (wifiOn && broadcasting) {
+    unsigned long now = millis();
+    if (now - lastPing >= broadcastIntervalMs) {
+      lastPing = now;
+      sendPing();
+    }
+  }
+
+  if (wifiOn) {
+    checkForAck();
+  }
+}
+
+// ---------------- Command handling ----------------
+
+bool awaitingFreqInput = false;
+String freqInputBuffer = "";
+
+void handleCommand(char c) {
+  // If we're in the middle of collecting a frequency value, route input there
+  Serial.print("awaitingFreqInput: "); 
+  Serial.print(awaitingFreqInput);
+  Serial.print(", c: ");
+  Serial.println(c);
+
+  if (awaitingFreqInput) {
+    Serial.println("Enter awaitingFreqInput function");
+    if (c == '\n' || c == '\r') {
+      if (freqInputBuffer.length() > 0) {
+        Serial.println("Frequency input applied: " + freqInputBuffer);
+        applyFrequencyInput(freqInputBuffer);
+      }
+      freqInputBuffer = "";
+      awaitingFreqInput = false;
+      Serial.println("Cleared and reset");
+    } else if ((c >= '0' && c <= '9') || c == '.') {
+      freqInputBuffer += c;
+    } else {
+      // ignore stray characters while collecting a number
+    }
+    return;
+  }
+
+  switch (c) {
+    case 'i':
+    case 'I':
+      setWifi(true);
+      clearBuffer();
+      break;
+    case 'o':
+    case 'O':
+      setWifi(false);
+      clearBuffer();
+      break;
+    case 'b':
+    case 'B':
+      toggleBroadcast();
+      clearBuffer();
+      break;
+    case 'f':
+    case 'F':
+      sendBLE("Range from 10 milliseconds (100 Hz) to 2 Seconds (0.5 Hz)");
+      sendBLE("Example 10 Hz  = 100 milliseconds ping interval");
+      sendBLE("Enter broadcast frequency in Hz (e.g. 10) then press Enter:");
+      awaitingFreqInput = true;
+      freqInputBuffer = "";
+      clearBuffer();
+      break;
+    case 'p':
+    case 'P':
+      printStatus();
+      clearBuffer();
+      break;
+    case 'm':
+    case 'M':
+    case '?':
+      printMenu();
+      clearBuffer();
+      break;
+    case '\n':
+    case '\r':
+      break;
+    default:
+      sendBLE("Unknown command. Send 'm' for menu.");
+      clearBuffer();
+      break;
+  }
+}
+
+void applyFrequencyInput(const String &input) {
+  float hz = input.toFloat();
+
+  if (hz <= 0) {
+    sendBLE("Invalid frequency: " + input);
+    return;
+  }
+
+  // clamp to sane bounds: 0.5 Hz to 100 Hz
+  if (hz < 0.5) hz = 0.5;
+  if (hz > 100) hz = 100;
+
+  broadcastIntervalMs = (unsigned long)(1000.0 / hz);
+  if (broadcastIntervalMs < 10) broadcastIntervalMs = 10;
+
+  sendBLE("Broadcast speed set to " + String(hz, 1) + " Hz (interval " + String(broadcastIntervalMs) + " ms)");
+}
+
+void setWifi(bool on) {
+  if (on == wifiOn) {
+    sendBLE(on ? "WiFi already ON" : "WiFi already OFF");
+    return;
+  }
+
+  if (on) {
+    WiFi.mode(WIFI_AP);
+    bool ok = WiFi.softAP(AP_SSID, AP_PASSWORD, AP_CHANNEL);
+    if (ok) {
+      udp.begin(UDP_PORT);
+      wifiOn = true;
+      sendBLE("WiFi AP started: " + String(AP_SSID) + " ch" + String(AP_CHANNEL));
+    } else {
+      sendBLE("Failed to start WiFi AP");
+    }
+  } else {
+    broadcasting = false; // stop pings before killing wifi
+    udp.stop();
+    WiFi.softAPdisconnect(true);
+    WiFi.mode(WIFI_OFF);
+    wifiOn = false;
+    sendBLE("WiFi OFF");
+  }
+}
+
+void toggleBroadcast() {
+  if (!wifiOn) {
+    sendBLE("Cannot broadcast: WiFi is OFF. Send '1' to enable WiFi first.");
+    return;
+  }
+  broadcasting = !broadcasting;
+  sendBLE(broadcasting ? "Broadcasting STARTED" : "Broadcasting STOPPED");
+}
+
+void adjustSpeed(float multiplier) {
+  unsigned long newInterval = (unsigned long)(broadcastIntervalMs / multiplier);
+  if (newInterval < 10) newInterval = 10;       // cap at 100 Hz
+  if (newInterval > 2000) newInterval = 2000;   // floor at 0.5 Hz
+  broadcastIntervalMs = newInterval;
+
+  float hz = 1000.0 / broadcastIntervalMs;
+  sendBLE("Broadcast speed = " + String(hz, 1) + " Hz (interval " + String(broadcastIntervalMs) + " ms)");
+}
+
+// ---------------- Status / menu ----------------
+
+void printMenu() {
+  String menu =
+    "\n--- ESP32 CSI Controller ---\n"
+    "i : WiFi ON\n"
+    "o : WiFi OFF\n"
+    "b : Start/Stop broadcasting ping\n"
+    "f : Set broadcast frequency (Hz)\n"
+    "p : Print status\n"
+    "m : Show this menu\n"
+    "-----------------------------\n";
+  sendBLE(menu);
+}
+
+void printStatus() {
+  int stationCount = wifiOn ? WiFi.softAPgetStationNum() : 0;
+  float hz = 1000.0 / broadcastIntervalMs;
+
+  String status = "\n--- Status ---\n";
+  status += "WiFi: " + String(wifiOn ? "ON" : "OFF") + "\n";
+
+  if (wifiOn) {
+    status += "Devices connected: " + String(stationCount) + "\n";
+  } else {
+    status += "No devices connected\n";
+  }
+
+  status += "Broadcasting: " + String(broadcasting ? "YES" : "NO") + "\n";
+  status += "Ping speed =  " + String(hz, 1) + " Hz (" + String(broadcastIntervalMs) + " ms interval)\n";
+  status += "Sequence count: " + String(seq) + "\n";
+  status += "--------------\n";
+
+  sendBLE(status);
+}
+
+void sendBLE(const String &msg) {
+  Serial.println(msg); // mirror to USB serial for debugging
+  bleSerial.print(msg.c_str());
+  String newline_msg = "\n"; // ensure newline after message
+  bleSerial.print(newline_msg.c_str());
+  //bleSerial.print("\n".c_str());
+}
+
+// ---------------- WiFi ping / ack logic ----------------
+
+void sendPing() {
+  uint64_t sendTime = (uint64_t)esp_timer_get_time();
+
+  char payload[48];
+  snprintf(payload, sizeof(payload), "PING,%lu,%llu", (unsigned long)seq, sendTime);
+
+  udp.beginPacket(piIP, UDP_PORT);
+  udp.write((const uint8_t*)payload, strlen(payload));
+  udp.endPacket();
+
+  PendingPing &slot = pending[seq % PENDING_SIZE];
+  slot.seq = seq;
+  slot.sendTimeUs = sendTime;
+  slot.inUse = true;
+
+  seq++;
+}
+
+void checkForAck() {
+  int packetSize = udp.parsePacket();
+  if (packetSize <= 0) return;
+
+  char buf[64];
+  int len = udp.read(buf, sizeof(buf) - 1);
+  if (len <= 0) return;
+  buf[len] = '\0';
+
+  uint32_t ackSeq;
+  uint64_t echoedSendTime, piRecvTime;
+  if (sscanf(buf, "ACK,%lu,%llu,%llu", &ackSeq, &echoedSendTime, &piRecvTime) == 3) {
+    uint64_t now = (uint64_t)esp_timer_get_time();
+
+    PendingPing &slot = pending[ackSeq % PENDING_SIZE];
+    if (slot.inUse && slot.seq == ackSeq) {
+      uint64_t rtt = now - slot.sendTimeUs;
+      int64_t offsetEstimate = (int64_t)piRecvTime - (int64_t)slot.sendTimeUs - (int64_t)(rtt / 2);
+
+      Serial.printf("seq=%lu rtt_us=%llu pi_recv_us=%llu offset_est_us=%lld\n",
+                     (unsigned long)ackSeq, rtt, piRecvTime, offsetEstimate);
+
+      slot.inUse = false;
+    }
+  }
+}
+
+void clearBuffer()
+{
+  while(bleSerial.available())
+    {
+      bleSerial.read();
+    }
+}
