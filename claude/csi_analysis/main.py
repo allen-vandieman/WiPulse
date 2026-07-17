@@ -61,6 +61,10 @@ def parse_args(argv=None):
     p.add_argument("--nfft", type=int, default=None,
                    help="Override nfft directly instead of deriving from --bw")
     p.add_argument("--udp-port", type=int, default=5500, help="UDP port CSI was sent to")
+    p.add_argument("--header-format", default="auto", choices=["auto", "legacy", "rssi"],
+                   help="Nexmon CSI header layout: 'legacy' = 6-byte magic (main README), "
+                        "'rssi' = 2-byte magic + RSSI + FrameControl (newer Pi forks). "
+                        "'auto' detects per-packet.")
     p.add_argument("--src-ip", default="10.10.10.10",
                    help="Expected CSI source IP; pass '' to disable this filter")
     p.add_argument("--out-dir", default="results", help="Directory for outputs (plots, exports)")
@@ -122,6 +126,7 @@ def main(argv=None):
     frames = list(iter_pcap_csi_frames(
         args.pcap, chip=args.chip, bw=args.bw, udp_port=args.udp_port,
         nfft_override=args.nfft, src_ip_filter=(args.src_ip or None),
+        header_format=args.header_format,
     ))
 
     if not frames:

@@ -6,22 +6,43 @@ files, e.g.:
 
     sudo tcpdump -i wlan0 udp port 5500 -w csi_capture.pcap
 
-Frame layout (per the nexmon_csi project README), starting at byte 0 of the
-UDP *payload* (i.e. after the Ethernet/IP/UDP headers have been stripped):
+There are two header layouts in the wild, depending on which nexmon_csi
+fork/version produced the capture. Both start at byte 0 of the UDP
+*payload* (i.e. after Ethernet/IP/UDP headers have been stripped):
 
+Legacy layout (main seemoo-lab README, older builds), HEADER_LEN=20:
     offset  size  field
     ------  ----  -----------------------------------------------------
-    0       4     magic bytes, 0x11111111
-    4       2     magic bytes, 0x1111 (added in nexmon_csi PR #256)
-    6       6     source MAC address of the frame that triggered capture
+    0       6     magic bytes, 0x111111111111 (4-byte + 2-byte magic
+                   concatenated back to back)
+    6       6     source MAC address of the triggering frame
     12      2     sequence number of the triggering Wi-Fi frame (uint16)
     14      2     core (low 3 bits) / spatial stream (next 3 bits)
     16      2     chanspec used during extraction
     18      2     chip version
-    20      -     CSI payload: nfft * 4 bytes
-                     - bcm4339 / bcm43455c0 : interleaved int16 I/Q
-                     - bcm4358 / bcm4366c0  : packed float format
-                       (9/5 or 12/6 mantissa/exponent bits, see unpack_float)
+    20      -     CSI payload
+
+Newer layout (e.g. zeroby0/nexmonster Pi forks), HEADER_LEN=18:
+    offset  size  field
+    ------  ----  -----------------------------------------------------
+    0       2     magic bytes, 0x1111
+    2       1     RSSI (signed int8, dBm)
+    3       1     Frame Control byte of the triggering frame
+    4       6     source MAC address of the triggering frame
+    10      2     sequence number of the triggering Wi-Fi frame (uint16)
+    12      2     core (low 3 bits) / spatial stream (next 3 bits)
+    14      2     chanspec used during extraction
+    16      2     chip version
+    18      -     CSI payload
+
+In both layouts, the CSI payload itself is:
+    - bcm4339 / bcm43455c0 : interleaved int16 I/Q, nfft*4 bytes
+    - bcm4358 / bcm4366c0  : packed float format (9/5 or 12/6
+      mantissa/exponent bits, see unpack_float_acphy), nfft*4 bytes
+
+By default this module auto-detects which layout a capture uses (see
+`detect_header_format`). Pass --header-format explicitly on the CLI if
+auto-detection picks the wrong one.
 
 This module uses scapy only to parse the pcap container / Ethernet-IP-UDP
 framing (already a dependency in your capture scripts), and does all
@@ -39,8 +60,13 @@ import numpy as np
 
 logger = logging.getLogger("csi_analysis.decoder")
 
-HEADER_LEN = 20  # bytes, per the layout above
-MAGIC = b"\x11\x11\x11\x11\x11\x11"  # 4-byte + 2-byte magic, concatenated
+# Two known Nexmon CSI UDP header layouts. "legacy" = main seemoo-lab README
+# (6-byte magic). "rssi" = newer forks with 2-byte magic + RSSI + Frame
+# Control byte ahead of the MAC (seen in the wild on some Pi builds).
+HEADER_FORMATS = {
+    "legacy": {"header_len": 20, "magic": b"\x11\x11\x11\x11\x11\x11", "has_rssi_fc": False},
+    "rssi":   {"header_len": 18, "magic": b"\x11\x11", "has_rssi_fc": True},
+}
 
 # Chip -> ("format", params). "int16" chips give raw I/Q. "float" chips need
 # the packed-float unpacking algorithm ported from unpack_float.c.
@@ -71,11 +97,40 @@ class CSIFrame:
     chip_version: int
     csi: np.ndarray            # complex128, length nfft, as-stored subcarrier
                                 # order (NOT fftshifted -- see analysis.py)
+    rssi: Optional[int] = None         # dBm, only present in "rssi" header format
+    frame_control: Optional[int] = None  # only present in "rssi" header format
     raw_len: int = field(repr=False, default=0)
 
 
 def _mac_str(b: bytes) -> str:
     return ":".join(f"{x:02x}" for x in b)
+
+
+def detect_header_format(payload: bytes) -> str:
+    """
+    Best-effort auto-detect of which header layout a UDP payload uses.
+
+    Both layouts start with 0x11 0x11. We disambiguate by checking whether
+    bytes 2-5 also look like magic (0x11 0x11 0x11 0x11 -> legacy) versus
+    looking like a plausible RSSI/FrameControl pair (-> rssi format). RSSI
+    as a signed int8 for real Wi-Fi is virtually always in [-100, 0]; that's
+    used as the tiebreaker.
+    """
+    if len(payload) < 6 or payload[0:2] != b"\x11\x11":
+        raise DecodeError(f"bad magic bytes: {payload[:6].hex()}")
+
+    if payload[2:6] == b"\x11\x11\x11\x11":
+        return "legacy"
+
+    rssi_signed = payload[2] - 256 if payload[2] >= 128 else payload[2]
+    if -100 <= rssi_signed <= 0:
+        return "rssi"
+
+    # Fall back to legacy if the RSSI heuristic doesn't look plausible --
+    # better to try the more common/documented layout than guess wrong twice.
+    return "legacy"
+
+
 
 
 def unpack_float_acphy(nbits: int, nman: int, nexp: int, nfft: int,
@@ -174,30 +229,63 @@ def decode_int16_csi(csi_bytes: bytes, nfft: int) -> np.ndarray:
 
 
 def decode_frame_payload(payload: bytes, index: int, ts: float, chip: str,
-                          bw: int, nfft_override: Optional[int] = None) -> CSIFrame:
+                          bw: int, nfft_override: Optional[int] = None,
+                          header_format: str = "auto") -> CSIFrame:
     """
     Decode a single UDP payload (post IP/UDP stripping) into a CSIFrame.
     Raises DecodeError if the payload isn't a valid Nexmon CSI frame.
+
+    header_format: "auto" (default, per-packet detection), "legacy", or "rssi".
     """
-    if len(payload) < HEADER_LEN:
-        raise DecodeError(f"payload too short for header ({len(payload)} < {HEADER_LEN})")
+    if header_format == "auto":
+        fmt_name = detect_header_format(payload)
+    elif header_format in HEADER_FORMATS:
+        fmt_name = header_format
+    else:
+        raise DecodeError(f"unknown header_format '{header_format}'")
 
-    if payload[:6] != MAGIC:
-        raise DecodeError(f"bad magic bytes: {payload[:6].hex()}")
+    fmt = HEADER_FORMATS[fmt_name]
+    header_len = fmt["header_len"]
 
-    src_mac = _mac_str(payload[6:12])
-    seq_num = struct.unpack("<H", payload[12:14])[0]
-    core_stream = struct.unpack("<H", payload[14:16])[0]
+    if len(payload) < header_len:
+        raise DecodeError(f"payload too short for '{fmt_name}' header "
+                           f"({len(payload)} < {header_len})")
+
+    if payload[:len(fmt["magic"])] != fmt["magic"]:
+        raise DecodeError(f"bad magic bytes for '{fmt_name}' format: "
+                           f"{payload[:6].hex()}")
+
+    rssi = None
+    frame_control = None
+
+    if fmt["has_rssi_fc"]:
+        rssi_byte = payload[2]
+        rssi = rssi_byte - 256 if rssi_byte >= 128 else rssi_byte
+        frame_control = payload[3]
+        off = 4
+    else:
+        off = 6
+
+    src_mac = _mac_str(payload[off:off + 6])
+    off += 6
+    seq_num = struct.unpack("<H", payload[off:off + 2])[0]
+    off += 2
+    core_stream = struct.unpack("<H", payload[off:off + 2])[0]
+    off += 2
     core = core_stream & 0x7
     spatial_stream = (core_stream >> 3) & 0x7
-    chanspec = struct.unpack("<H", payload[16:18])[0]
-    chip_version = struct.unpack("<H", payload[18:20])[0]
+    chanspec = struct.unpack("<H", payload[off:off + 2])[0]
+    off += 2
+    chip_version = struct.unpack("<H", payload[off:off + 2])[0]
+    off += 2
+
+    assert off == header_len, f"internal error: header parse offset {off} != {header_len}"
 
     nfft = nfft_override or BW_TO_NFFT.get(bw)
     if nfft is None:
         raise DecodeError(f"unsupported bandwidth {bw} MHz (expected 20/40/80, or pass --nfft)")
 
-    csi_bytes = payload[HEADER_LEN:HEADER_LEN + nfft * 4]
+    csi_bytes = payload[header_len:header_len + nfft * 4]
 
     if chip not in CHIP_TABLE:
         raise DecodeError(f"unknown chip '{chip}', expected one of {list(CHIP_TABLE)}")
@@ -214,14 +302,16 @@ def decode_frame_payload(payload: bytes, index: int, ts: float, chip: str,
     return CSIFrame(
         index=index, ts=ts, src_mac=src_mac, seq_num=seq_num, core=core,
         spatial_stream=spatial_stream, chanspec=chanspec,
-        chip_version=chip_version, csi=csi, raw_len=len(payload),
+        chip_version=chip_version, csi=csi, rssi=rssi,
+        frame_control=frame_control, raw_len=len(payload),
     )
 
 
 def iter_pcap_csi_frames(pcap_path: str, chip: str = "43455c0", bw: int = 80,
                           udp_port: int = 5500,
                           nfft_override: Optional[int] = None,
-                          src_ip_filter: Optional[str] = "10.10.10.10"
+                          src_ip_filter: Optional[str] = "10.10.10.10",
+                          header_format: str = "auto",
                           ) -> Iterator[CSIFrame]:
     """
     Stream-decode CSI frames out of a pcap file.
@@ -231,6 +321,9 @@ def iter_pcap_csi_frames(pcap_path: str, chip: str = "43455c0", bw: int = 80,
       - optionally doesn't match src_ip_filter (nexmon CSI frames come from
         10.10.10.10 -> 255.255.255.255 by convention; pass None to disable)
       - fails Nexmon magic-byte / length validation
+
+    header_format: "auto" (default), "legacy", or "rssi" -- see module
+    docstring for the two known header layouts.
 
     Uses scapy's PcapReader for a lazy, memory-friendly read so large
     captures don't need to be loaded in full.
@@ -268,7 +361,7 @@ def iter_pcap_csi_frames(pcap_path: str, chip: str = "43455c0", bw: int = 80,
             try:
                 frame = decode_frame_payload(
                     payload, index=n_udp_match - 1, ts=ts, chip=chip, bw=bw,
-                    nfft_override=nfft_override,
+                    nfft_override=nfft_override, header_format=header_format,
                 )
             except DecodeError as e:
                 n_skipped += 1

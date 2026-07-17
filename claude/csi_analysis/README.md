@@ -42,6 +42,22 @@ decoding will silently misalign. If you're not sure, run with `--stats-only`
 first: if `estimated_lost`/`duplicate_or_reordered` look insane or frames
 mostly fail to decode, try the other bandwidth or chip first.
 
+## Header format
+
+There are two Nexmon CSI UDP header layouts in the wild, depending on which
+nexmon_csi fork/version produced the capture:
+
+- **`legacy`** (main seemoo-lab README): 6-byte magic, then MAC/seq/etc.
+- **`rssi`** (some newer Pi forks, e.g. zeroby0/nexmonster): 2-byte magic +
+  1-byte RSSI + 1-byte Frame Control, *then* MAC/seq/etc. (18-byte header
+  instead of 20).
+
+`--header-format auto` (default) detects this per-packet and just works for
+either. If you know which one your build uses you can force it with
+`--header-format legacy` or `--header-format rssi` — mostly useful for
+debugging, since a mismatch fails fast with a clear "bad magic bytes"
+message rather than silently misparsing.
+
 ## Step 1 — Validate the capture is well-formed
 
 ```bash
@@ -55,8 +71,9 @@ reports:
 - estimated packet rate
 
 If frames are being skipped, `-v` will log the specific `DecodeError` for
-each one (bad magic bytes almost always means wrong chip/bw, or that you
-captured something other than the CSI UDP stream on port 5500).
+each one. "bad magic bytes" almost always means the wrong `--header-format`
+was forced (try `auto`, the default) or, less commonly, wrong chip/bw, or
+that you captured something other than the CSI UDP stream on port 5500.
 
 ## Step 2 — Look at it
 
