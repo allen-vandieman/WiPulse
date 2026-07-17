@@ -1,0 +1,285 @@
+"""
+decoder.py
+==========
+Decoding of Nexmon CSI UDP frames captured via tcpdump/Wireshark into pcap
+files, e.g.:
+
+    sudo tcpdump -i wlan0 udp port 5500 -w csi_capture.pcap
+
+Frame layout (per the nexmon_csi project README), starting at byte 0 of the
+UDP *payload* (i.e. after the Ethernet/IP/UDP headers have been stripped):
+
+    offset  size  field
+    ------  ----  -----------------------------------------------------
+    0       4     magic bytes, 0x11111111
+    4       2     magic bytes, 0x1111 (added in nexmon_csi PR #256)
+    6       6     source MAC address of the frame that triggered capture
+    12      2     sequence number of the triggering Wi-Fi frame (uint16)
+    14      2     core (low 3 bits) / spatial stream (next 3 bits)
+    16      2     chanspec used during extraction
+    18      2     chip version
+    20      -     CSI payload: nfft * 4 bytes
+                     - bcm4339 / bcm43455c0 : interleaved int16 I/Q
+                     - bcm4358 / bcm4366c0  : packed float format
+                       (9/5 or 12/6 mantissa/exponent bits, see unpack_float)
+
+This module uses scapy only to parse the pcap container / Ethernet-IP-UDP
+framing (already a dependency in your capture scripts), and does all
+Nexmon-specific decoding itself in pure Python/NumPy.
+"""
+
+from __future__ import annotations
+
+import logging
+import struct
+from dataclasses import dataclass, field
+from typing import Iterator, Optional
+
+import numpy as np
+
+logger = logging.getLogger("csi_analysis.decoder")
+
+HEADER_LEN = 20  # bytes, per the layout above
+MAGIC = b"\x11\x11\x11\x11\x11\x11"  # 4-byte + 2-byte magic, concatenated
+
+# Chip -> ("format", params). "int16" chips give raw I/Q. "float" chips need
+# the packed-float unpacking algorithm ported from unpack_float.c.
+CHIP_TABLE = {
+    "4339":     {"format": "int16"},
+    "43455c0":  {"format": "int16"},
+    "4358":     {"format": "float", "nbits": 10, "nman": 9,  "nexp": 5},
+    "4366c0":   {"format": "float", "nbits": 10, "nman": 12, "nexp": 6},
+}
+
+BW_TO_NFFT = {20: 64, 40: 128, 80: 256}
+
+
+class DecodeError(ValueError):
+    """Raised for a malformed / non-CSI frame."""
+
+
+@dataclass
+class CSIFrame:
+    """A single decoded CSI frame."""
+    index: int                 # position of this frame within the capture
+    ts: float                  # capture timestamp (seconds, from pcap header)
+    src_mac: str
+    seq_num: int
+    core: int
+    spatial_stream: int
+    chanspec: int
+    chip_version: int
+    csi: np.ndarray            # complex128, length nfft, as-stored subcarrier
+                                # order (NOT fftshifted -- see analysis.py)
+    raw_len: int = field(repr=False, default=0)
+
+
+def _mac_str(b: bytes) -> str:
+    return ":".join(f"{x:02x}" for x in b)
+
+
+def unpack_float_acphy(nbits: int, nman: int, nexp: int, nfft: int,
+                        H: np.ndarray, autoscale: bool = False) -> np.ndarray:
+    """
+    Pure-Python/NumPy port of unpack_float_acphy() from unpack_float.c.
+
+    Decodes the Broadcom "packed float" CSI format used by bcm4358 /
+    bcm4366c0 into a complex128 array of length nfft.
+
+    H: array-like of uint32, length nfft (one word per subcarrier).
+    Returns: complex128 ndarray, length nfft.
+    """
+    H = np.asarray(H, dtype=np.uint32)
+    if H.shape[0] != nfft:
+        raise DecodeError(f"unpack_float_acphy: expected {nfft} words, got {H.shape[0]}")
+
+    # The C reference does all of this in 32-bit int32_T arithmetic, including
+    # (well-defined-in-practice) wraparound on left shifts. We match that
+    # exactly with int64 intermediate math + explicit mask back to signed-32
+    # range after every shift, rather than letting NumPy's native integer
+    # promotion silently change edge-case behavior.
+    H64 = H.astype(np.int64)
+
+    SGN_MASK = 1 << 31
+    iq_mask = (1 << (nman - 1)) - 1
+    e_mask = (1 << nexp) - 1
+    e_p = 1 << (nexp - 1)
+    sgnr_mask = 1 << (nexp + 2 * nman - 1)
+    sgni_mask = sgnr_mask >> nman
+    e_zero = -nman
+
+    def to_int32(v):
+        """Emulate C's int32_T truncation/wraparound."""
+        return ((v + 0x80000000) & 0xFFFFFFFF) - 0x80000000
+
+    vi = (H64 >> (nexp + nman)) & iq_mask
+    vq = (H64 >> nexp) & iq_mask
+    e = H64 & e_mask
+    e = np.where(e >= e_p, e - (e_p << 1), e)
+    He = e.copy()
+
+    maxbit = -e_p
+    if autoscale:
+        # Per-element leading-bit scan, matching the C reference exactly.
+        for i in range(nfft):
+            x = int(vi[i] | vq[i])
+            ei = int(He[i])
+            if x:
+                m, b, s = 0xffff0000, 0xffff, 16
+                while s > 0:
+                    if x & m:
+                        ei += s
+                        x >>= s
+                    s >>= 1
+                    m = (m >> s) & b
+                    b >>= s
+                if ei > maxbit:
+                    maxbit = ei
+            He[i] = ei
+
+    sgn_i_flag = (H64 & sgnr_mask) != 0
+    sgn_q_flag = (H64 & sgni_mask) != 0
+    vi = np.where(sgn_i_flag, vi | SGN_MASK, vi)
+    vq = np.where(sgn_q_flag, vq | SGN_MASK, vq)
+
+    shft = nbits - maxbit
+
+    def rescale(v: np.ndarray, e_word: np.ndarray) -> np.ndarray:
+        sgn = np.where((v & SGN_MASK) != 0, -1, 1)
+        mag = np.where((v & SGN_MASK) != 0, v & ~SGN_MASK, v)
+        ee = e_word + shft
+        out = np.zeros_like(mag)
+        m_zero = ee < e_zero
+        m_rshift = (ee >= e_zero) & (ee < 0)
+        m_lshift = ee >= 0
+        out[m_rshift] = mag[m_rshift] >> (-ee[m_rshift])
+        # left shift in C wraps at 32 bits (int32_T); replicate that exactly
+        out[m_lshift] = to_int32(mag[m_lshift] << ee[m_lshift])
+        out[m_zero] = 0
+        return to_int32(sgn * out)
+
+    real = rescale(vi, He)
+    imag = rescale(vq, He)
+    return real.astype(np.float64) + 1j * imag.astype(np.float64)
+
+
+def decode_int16_csi(csi_bytes: bytes, nfft: int) -> np.ndarray:
+    """Decode bcm4339 / bcm43455c0 style interleaved little-endian int16 I/Q."""
+    expected = nfft * 4
+    if len(csi_bytes) < expected:
+        raise DecodeError(f"int16 CSI payload too short: {len(csi_bytes)} < {expected}")
+    vals = np.frombuffer(csi_bytes[:expected], dtype="<i2")  # little-endian int16
+    vals = vals.reshape(nfft, 2)
+    return vals[:, 0].astype(np.float64) + 1j * vals[:, 1].astype(np.float64)
+
+
+def decode_frame_payload(payload: bytes, index: int, ts: float, chip: str,
+                          bw: int, nfft_override: Optional[int] = None) -> CSIFrame:
+    """
+    Decode a single UDP payload (post IP/UDP stripping) into a CSIFrame.
+    Raises DecodeError if the payload isn't a valid Nexmon CSI frame.
+    """
+    if len(payload) < HEADER_LEN:
+        raise DecodeError(f"payload too short for header ({len(payload)} < {HEADER_LEN})")
+
+    if payload[:6] != MAGIC:
+        raise DecodeError(f"bad magic bytes: {payload[:6].hex()}")
+
+    src_mac = _mac_str(payload[6:12])
+    seq_num = struct.unpack("<H", payload[12:14])[0]
+    core_stream = struct.unpack("<H", payload[14:16])[0]
+    core = core_stream & 0x7
+    spatial_stream = (core_stream >> 3) & 0x7
+    chanspec = struct.unpack("<H", payload[16:18])[0]
+    chip_version = struct.unpack("<H", payload[18:20])[0]
+
+    nfft = nfft_override or BW_TO_NFFT.get(bw)
+    if nfft is None:
+        raise DecodeError(f"unsupported bandwidth {bw} MHz (expected 20/40/80, or pass --nfft)")
+
+    csi_bytes = payload[HEADER_LEN:HEADER_LEN + nfft * 4]
+
+    if chip not in CHIP_TABLE:
+        raise DecodeError(f"unknown chip '{chip}', expected one of {list(CHIP_TABLE)}")
+    spec = CHIP_TABLE[chip]
+
+    if spec["format"] == "int16":
+        csi = decode_int16_csi(csi_bytes, nfft)
+    else:
+        if len(csi_bytes) < nfft * 4:
+            raise DecodeError(f"CSI payload too short: {len(csi_bytes)} < {nfft * 4}")
+        H = np.frombuffer(csi_bytes[:nfft * 4], dtype="<u4")
+        csi = unpack_float_acphy(spec["nbits"], spec["nman"], spec["nexp"], nfft, H)
+
+    return CSIFrame(
+        index=index, ts=ts, src_mac=src_mac, seq_num=seq_num, core=core,
+        spatial_stream=spatial_stream, chanspec=chanspec,
+        chip_version=chip_version, csi=csi, raw_len=len(payload),
+    )
+
+
+def iter_pcap_csi_frames(pcap_path: str, chip: str = "43455c0", bw: int = 80,
+                          udp_port: int = 5500,
+                          nfft_override: Optional[int] = None,
+                          src_ip_filter: Optional[str] = "10.10.10.10"
+                          ) -> Iterator[CSIFrame]:
+    """
+    Stream-decode CSI frames out of a pcap file.
+
+    Skips (with a logged warning, not a crash) any packet that:
+      - isn't UDP on udp_port
+      - optionally doesn't match src_ip_filter (nexmon CSI frames come from
+        10.10.10.10 -> 255.255.255.255 by convention; pass None to disable)
+      - fails Nexmon magic-byte / length validation
+
+    Uses scapy's PcapReader for a lazy, memory-friendly read so large
+    captures don't need to be loaded in full.
+    """
+    try:
+        from scapy.all import PcapReader, UDP, IP  # noqa: E402  (lazy import)
+    except ImportError as e:  # pragma: no cover
+        raise ImportError(
+            "scapy is required to read pcap files. Install with: pip install scapy"
+        ) from e
+
+    n_seen = 0
+    n_udp_match = 0
+    n_decoded = 0
+    n_skipped = 0
+
+    with PcapReader(pcap_path) as reader:
+        for pkt in reader:
+            n_seen += 1
+            if not pkt.haslayer(UDP):
+                continue
+            udp = pkt[UDP]
+            if udp.dport != udp_port:
+                continue
+            if src_ip_filter and pkt.haslayer(IP) and pkt[IP].src != src_ip_filter:
+                continue
+            if udp.payload is None:
+                continue
+            payload = bytes(udp.payload)
+            if len(payload) == 0:
+                continue
+            n_udp_match += 1
+
+            ts = float(pkt.time) if hasattr(pkt, "time") else 0.0
+            try:
+                frame = decode_frame_payload(
+                    payload, index=n_udp_match - 1, ts=ts, chip=chip, bw=bw,
+                    nfft_override=nfft_override,
+                )
+            except DecodeError as e:
+                n_skipped += 1
+                logger.warning("Skipped packet %d: %s", n_seen, e)
+                continue
+
+            n_decoded += 1
+            yield frame
+
+    logger.info(
+        "pcap scan complete: %d packets seen, %d matched UDP/%d, "
+        "%d decoded OK, %d skipped (bad frame)",
+        n_seen, n_udp_match, udp_port, n_decoded, n_skipped,
+    )
