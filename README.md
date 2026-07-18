@@ -2,7 +2,7 @@
 
 WiPulse - Contactless Vital Sign Extraction
 
-[Start here](/setup/testing.md)
+[Start here](/setup/extraction.md)
 
 ## Contents
 
@@ -54,4 +54,4 @@ Progress thus far:
 
 1. [Setup TX](tx/setup.md)
 1. [Setup RX](rx/setup.md)
-1. [Testing](setup/testing.md)
+1. [Setup Extraction](setup/extraction.md)

@@ -1,0 +1,190 @@
+# csi_analysis
+
+Toolkit for decoding and analyzing [Nexmon CSI](https://github.com/seemoo-lab/nexmon_csi)
+captures (`sudo tcpdump -i wlan0 udp port 5500 -w csi_capture.pcap`) and
+validating that the extracted CSI actually reflects movement/obstacles in
+the environment.
+
+## Layout
+
+```
+csi_analysis/
+├── main.py          # CLI entry point
+├── decoder.py        # PCAP parsing + Nexmon header/CSI decoding (int16 & float formats)
+├── analysis.py        # Amplitude/phase, subcarrier selection, variance, FFT motion detection
+├── plotting.py        # Time plots, heatmaps, FFT plots (headless-safe)
+├── filters.py          # Hampel filter, Butterworth low-pass/band-pass
+├── utils.py             # Save/load to .npz / .csv, logging setup
+├── requirements.txt
+└── example_pcap/        # put test captures here
+```
+
+## Setup
+
+```bash
+pip install -r requirements.txt
+```
+
+## Chip / bandwidth
+
+Set `--chip` to whatever your nexmon_csi build targets:
+
+| chip       | CSI format                          |
+|------------|--------------------------------------|
+| `4339`     | int16 I/Q                            |
+| `43455c0`  | int16 I/Q  (Raspberry Pi 3B+/4 typical) |
+| `4358`     | packed float, 9 mantissa / 5 exponent bits |
+| `4366c0`   | packed float, 12 mantissa / 6 exponent bits |
+
+`--bw` (20/40/80 MHz) sets `nfft` (64/128/256 subcarriers) — this must match
+what you configured in `makecsiparams` / your nexmon_csi extraction, or
+decoding will silently misalign. If you're not sure, run with `--stats-only`
+first: if `estimated_lost`/`duplicate_or_reordered` look insane or frames
+mostly fail to decode, try the other bandwidth or chip first.
+
+## Header format
+
+There are two Nexmon CSI UDP header layouts in the wild, depending on which
+nexmon_csi fork/version produced the capture:
+
+- **`legacy`** (main seemoo-lab README): 6-byte magic, then MAC/seq/etc.
+- **`rssi`** (some newer Pi forks, e.g. zeroby0/nexmonster): 2-byte magic +
+  1-byte RSSI + 1-byte Frame Control, *then* MAC/seq/etc. (18-byte header
+  instead of 20).
+
+`--header-format auto` (default) detects this per-packet and just works for
+either. If you know which one your build uses you can force it with
+`--header-format legacy` or `--header-format rssi` — mostly useful for
+debugging, since a mismatch fails fast with a clear "bad magic bytes"
+message rather than silently misparsing.
+
+## Step 1 — Validate the capture is well-formed
+
+```bash
+python main.py --pcap csi_capture.pcap --chip 43455c0 --bw 80 --stats-only
+```
+
+This decodes every frame, checks the Nexmon magic bytes / header, and
+reports:
+- how many packets were seen vs. matched the UDP/CSI filter vs. decoded OK
+- estimated lost packets (from gaps in the embedded 802.11 sequence number)
+- estimated packet rate
+
+If frames are being skipped, `-v` will log the specific `DecodeError` for
+each one. "bad magic bytes" almost always means the wrong `--header-format`
+was forced (try `auto`, the default) or, less commonly, wrong chip/bw, or
+that you captured something other than the CSI UDP stream on port 5500.
+
+## Step 2 — Look at it
+
+```bash
+python main.py --pcap csi_capture.pcap --chip 43455c0 --bw 80 \
+    --out-dir results --heatmap --time-plot --variance-plot
+```
+
+- `heatmap.png` — packet x subcarrier amplitude. Real CSI should show smooth
+  structure across neighboring subcarriers (multipath response of the
+  channel), not white noise. A handful of null/pilot subcarriers reading
+  near-zero is normal and expected.
+- `variance.png` — per-subcarrier std dev. Very uniform, very low variance
+  across all subcarriers on a completely static link with nothing moving
+  is expected; a single wildly-off subcarrier suggests a decode/alignment
+  bug rather than real RF.
+
+## Step 3 — The movement test
+
+This is the actual "does CSI reflect the physical environment" check.
+
+1. **Baseline capture**: room empty/static, nobody moving, capture ~20-30s
+   at your normal TX rate (e.g. the 100 Hz `optimized-fast-sender.py`
+   pattern in this project).
+   ```bash
+   sudo tcpdump -i wlan0 udp port 5500 -w baseline.pcap
+   ```
+2. **Movement capture**: same link, same duration, but someone walks through
+   the Tx-Rx path (or you introduce/remove an obstacle) partway through.
+   ```bash
+   sudo tcpdump -i wlan0 udp port 5500 -w movement.pcap
+   ```
+3. Run both through the analyzer:
+   ```bash
+   python main.py --pcap baseline.pcap  --chip 43455c0 --bw 80 --out-dir results/baseline --heatmap --fft --variance-plot
+   python main.py --pcap movement.pcap  --chip 43455c0 --bw 80 --out-dir results/movement --heatmap --fft --variance-plot
+   ```
+4. Compare:
+   - **`motion_score`** (printed to console, also in `variance_analysis`):
+     should be noticeably higher in `movement` than `baseline`.
+   - **Heatmaps**: `movement.png` should show visible time-varying banding/
+     ripple where the walk happened; `baseline.png` should look comparatively
+     flat and static.
+   - **FFT (`--fft`)**: human walking typically shows energy in the
+     ~0.5-3 Hz band; breathing (if you try a "sit still and breathe" test
+     instead) is closer to ~0.2-0.4 Hz. The `dominant_freq_hz` printed
+     should land in a plausible range during movement and be comparatively
+     featureless/low-amplitude in the static baseline. Use `--fft-max-freq 5`
+     to zoom the plot into that range.
+
+If baseline and movement look statistically indistinguishable, that's a
+sign to check antenna placement/orientation, TX rate (needs to be fast
+enough relative to the motion you're trying to catch — Nyquist), or whether
+you're actually capturing on the right interface/channel.
+
+## Cleaning noisy data
+
+```bash
+python main.py --pcap movement.pcap --chip 43455c0 --bw 80 \
+    --out-dir results/movement --hampel --lowpass-hz 10 --fft --heatmap
+```
+
+- `--hampel` knocks out isolated spike artifacts per-subcarrier before
+  anything else runs.
+- `--lowpass-hz` applies a zero-phase Butterworth low-pass (needs a valid
+  estimated packet rate from your capture timestamps, printed in Step 1).
+
+## Exporting for ML
+
+```bash
+python main.py --pcap movement.pcap --chip 43455c0 --bw 80 \
+    --out-dir results/movement --save-npy --save-csv amplitude
+```
+
+- `--save-npy` writes `csi_dataset.npz` with the full complex CSI matrix,
+  timestamps, and sequence numbers (`np.load(...)`, keys: `csi`, `ts`,
+  `seq_num`, `nfft`, `fs_est`) — round-trips exactly, use this for anything
+  serious.
+- `--save-csv {complex,amplitude,phase}` writes a flat CSV, one row per
+  packet, for quick inspection in a spreadsheet or for pipelines that don't
+  want a NumPy dependency.
+
+## Useful flags reference
+
+Run `python main.py --help` for the full list; the ones worth knowing about:
+
+- `--subcarriers 10,20,30` — focus time-series/FFT plots on specific
+  subcarrier indices (indexed into the DC-centered/fftshifted axis) instead
+  of the mean over all of them. Good once you've found a subcarrier that's
+  particularly sensitive to your test motion.
+- `--exclude-dc-guard` — zero out DC and edge guard subcarriers before
+  analysis (these carry no real channel information and can skew variance).
+- `--src-ip ''` — disable the `10.10.10.10` source-IP filter if your setup
+  doesn't follow that nexmon_csi convention.
+
+## Reading the loss/stream diagnostics
+
+`estimated_lost` is computed from the pure 12-bit 802.11 sequence number
+(the raw Sequence Control field has a 4-bit fragment number packed into the
+low bits, which the decoder strips out). If this number looks enormous
+relative to `n_packets`, double check you're not on an old copy of this
+tool -- an earlier version of this decoder had that units bug and reported
+~15x inflated loss.
+
+The stats output also prints a `core`/`spatial_stream` breakdown. If your
+nexmon_csi config reports more than one core or spatial stream, you'll get
+multiple interleaved combinations in one capture -- each with its own
+baseline amplitude. Averaging across all of them (the default) produces a
+distinctive bimodal/banded pattern in time-series plots that has nothing to
+do with real motion. Use `--select-core N --select-stream M` to isolate one
+combination before doing time-series/FFT/motion analysis. When multiple
+streams share a capture, `duplicate_or_reordered` will also look inflated,
+since packets from different streams triggered by the same underlying
+Wi-Fi frame legitimately carry the same sequence number.
