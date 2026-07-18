@@ -9,10 +9,13 @@ Content
 1. [RX - Extractor](#extractor)
     1. [Boot](#boot)
     1. [Monitor Mode](#monitor-mode)
-    1. [Debug Monitor](#debug-monitor)
     1. [Configure](#configure)
     1. [Capture](#capture)
     1. [Unload](#unload)
+1. [Errors](#errors)
+    1. [Transmitter](#transmiter)
+    1. [Extractor](#extractor-1)
+        1. [Debug Monitor](#debug-monitor)
 
 ## Find Channel
 
@@ -30,10 +33,9 @@ sudo airodump-ng --channel 36 wlan0mon
 ## Transmitter
 
 ```bash
-#sudo iw dev wlan0 set power_save off
-#sudo systemctl stop NetworkManager
-#sudo pkill wpa_supplicant
 sudo airmon-ng check kill
+sudo airmon-ng start wlan0
+# Run twice for loading error
 sudo airmon-ng start wlan0
 sudo iw dev wlan0mon set channel 36 80MHz
 
@@ -46,6 +48,8 @@ sudo python3 optimized-fast-sender.py
 
 ```bash
 sudo airmon-ng check kill
+sudo airmon-ng start wlan0
+# Run twice for loading error
 sudo airmon-ng start wlan0
 sudo iw dev wlan0mon set channel 36 80MHz
 
@@ -60,6 +64,7 @@ sudo python3 rssi-receiver.py
 sudo airmon-ng stop wlan0mon
 sudo systemctl restart wpa_supplicant
 sudo systemctl restart NetworkManager
+sudo ifconfig wlan0 up
 
 # Best to reboot WIFI AP
 sudo reboot now
@@ -78,8 +83,10 @@ cd ~/nexmon
 source setup_env.sh
 cd $NEXMON_ROOT/patches/bcm43455c0/7_45_189/nexmon_csi
 
-# Build and install the patched firmware:
+# Kill wlan0
+sudo ifconfig wlan0 down
 
+# Build and install the patched firmware:
 make -f Makefile.rpi install-firmware
 make -f Makefile.rpi unmanage
 make -f Makefile.rpi reload-full
@@ -100,26 +107,6 @@ sudo ifconfig wlan0 up
 sudo tcpdump -i wlan0
 
 # If tcpdump fail, wlan0 was not working proper before Makefile.rpi reload-full
-```
-
-### Debug monitor
-
-```bash
-# Disable Power save
-sudo iw dev wlan0 set power_save off
-# RF-kill status
-sudo rfkill unblock all
-sudo nmcli radio wifi on
-sudo nmcli device wifi rescan
-sleep 3
-nmcli device wifi list
-sudo systemctl restart wpa_supplicant
-sudo systemctl restart NetworkManager
-
-# Setup monitor manual without filter
-sudo nexutil -k6/20          # match AP_CHANNEL above
-sudo nexutil -m1
-iw dev
 ```
 
 ### Configure
@@ -161,4 +148,36 @@ make -f Makefile.rpi restore-wifi
 
 sudo systemctl restart wpa_supplicant
 sudo systemctl restart NetworkManager
+```
+
+## Errors
+
+### Transmiter
+
+```bash
+sudo iw dev wlan0 set power_save off
+sudo systemctl stop NetworkManager
+sudo pkill wpa_supplicant
+```
+
+### Extractor
+
+#### Debug monitor
+
+```bash
+# Disable Power save
+sudo iw dev wlan0 set power_save off
+# RF-kill status
+sudo rfkill unblock all
+sudo nmcli radio wifi on
+sudo nmcli device wifi rescan
+sleep 3
+nmcli device wifi list
+sudo systemctl restart wpa_supplicant
+sudo systemctl restart NetworkManager
+
+# Setup monitor manual without filter
+sudo nexutil -k6/20          # match AP_CHANNEL above
+sudo nexutil -m1
+iw dev
 ```
