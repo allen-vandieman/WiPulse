@@ -11,7 +11,7 @@ clear all
 %% configuration
 CHIP = '43455c0';          % wifi chip (possible values 4339, 4358, 43455c0, 4366c0)
 BW = 80;                % bandwidth
-FILE = '..\captures\csi_capture.pcap';% capture file
+FILE = '..\..\captures\csi_capture.pcap';% capture file
 NPKTS_MAX = 10000;       % max number of UDPs to process
 
 %% read file
