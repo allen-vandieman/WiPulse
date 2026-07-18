@@ -168,3 +168,23 @@ Run `python main.py --help` for the full list; the ones worth knowing about:
   analysis (these carry no real channel information and can skew variance).
 - `--src-ip ''` — disable the `10.10.10.10` source-IP filter if your setup
   doesn't follow that nexmon_csi convention.
+
+## Reading the loss/stream diagnostics
+
+`estimated_lost` is computed from the pure 12-bit 802.11 sequence number
+(the raw Sequence Control field has a 4-bit fragment number packed into the
+low bits, which the decoder strips out). If this number looks enormous
+relative to `n_packets`, double check you're not on an old copy of this
+tool -- an earlier version of this decoder had that units bug and reported
+~15x inflated loss.
+
+The stats output also prints a `core`/`spatial_stream` breakdown. If your
+nexmon_csi config reports more than one core or spatial stream, you'll get
+multiple interleaved combinations in one capture -- each with its own
+baseline amplitude. Averaging across all of them (the default) produces a
+distinctive bimodal/banded pattern in time-series plots that has nothing to
+do with real motion. Use `--select-core N --select-stream M` to isolate one
+combination before doing time-series/FFT/motion analysis. When multiple
+streams share a capture, `duplicate_or_reordered` will also look inflated,
+since packets from different streams triggered by the same underlying
+Wi-Fi frame legitimately carry the same sequence number.

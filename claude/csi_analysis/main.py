@@ -40,6 +40,7 @@ from decoder import iter_pcap_csi_frames, CHIP_TABLE, BW_TO_NFFT
 from analysis import (
     build_dataset, report_sequence_gaps, fftshift_subcarriers, subcarrier_axis,
     amplitude, phase, select_subcarriers, variance_analysis, fft_motion_detection,
+    stream_breakdown, select_stream,
 )
 from filters import hampel_filter, butterworth_lowpass
 from plotting import plot_amplitude_time, plot_phase_time, plot_heatmap, plot_fft, plot_variance_bar
@@ -68,6 +69,12 @@ def parse_args(argv=None):
     p.add_argument("--src-ip", default="10.10.10.10",
                    help="Expected CSI source IP; pass '' to disable this filter")
     p.add_argument("--out-dir", default="results", help="Directory for outputs (plots, exports)")
+    p.add_argument("--select-core", type=int, default=None,
+                   help="Keep only packets from this core index (see the stream breakdown "
+                        "printed in stats). Must be combined with --select-stream.")
+    p.add_argument("--select-stream", type=int, default=None,
+                   help="Keep only packets from this spatial stream index. "
+                        "Must be combined with --select-core.")
 
     p.add_argument("--stats-only", action="store_true",
                    help="Only decode + print validity/loss stats; skip plots and exports")
@@ -138,12 +145,33 @@ def main(argv=None):
 
     dataset = build_dataset(frames)
     gaps = report_sequence_gaps(dataset)
+    combos = stream_breakdown(dataset)
 
     print("\n=== Capture validity ===")
     print(json.dumps(gaps, indent=2))
     print(f"nfft (subcarriers): {dataset.nfft}")
     print(f"capture span: {dataset.ts[-1] - dataset.ts[0]:.2f} s" if dataset.n_packets > 1 else "capture span: n/a")
     print(f"estimated packet rate: {dataset.fs_est:.2f} pkt/s")
+
+    print("\n=== Core / spatial-stream breakdown ===")
+    for (c, s), count in combos.items():
+        print(f"core={c} stream={s}: {count} packets")
+    if len(combos) > 1:
+        print("NOTE: multiple (core, stream) combinations detected. Any plot/metric that "
+              "averages across all packets will mix streams with potentially different "
+              "baselines (a classic cause of banding/bimodal jumps in time-series plots). "
+              "This also inflates 'duplicate_or_reordered' above -- packets from different "
+              "streams triggered by the same Wi-Fi frame legitimately share a sequence "
+              "number, so that's not a real anomaly by itself. "
+              "Use --select-core/--select-stream to isolate one for cleaner analysis.")
+
+    if args.select_core is not None or args.select_stream is not None:
+        if args.select_core is None or args.select_stream is None:
+            logger.error("--select-core and --select-stream must be given together")
+            return 1
+        dataset = select_stream(dataset, args.select_core, args.select_stream)
+        logger.info("Selected core=%d stream=%d: %d packets remain",
+                    args.select_core, args.select_stream, dataset.n_packets)
 
     if args.stats_only:
         return 0

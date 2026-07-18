@@ -99,6 +99,7 @@ class CSIFrame:
                                 # order (NOT fftshifted -- see analysis.py)
     rssi: Optional[int] = None         # dBm, only present in "rssi" header format
     frame_control: Optional[int] = None  # only present in "rssi" header format
+    fragment_num: int = 0
     raw_len: int = field(repr=False, default=0)
 
 
@@ -268,8 +269,16 @@ def decode_frame_payload(payload: bytes, index: int, ts: float, chip: str,
 
     src_mac = _mac_str(payload[off:off + 6])
     off += 6
-    seq_num = struct.unpack("<H", payload[off:off + 2])[0]
+    seq_ctrl = struct.unpack("<H", payload[off:off + 2])[0]
     off += 2
+    # The 802.11 Sequence Control field packs a 4-bit Fragment Number into
+    # the low bits and the 12-bit Sequence Number into the high bits
+    # (SeqCtrl = SeqNum<<4 | FragNum). For loss/gap analysis we need the
+    # pure 12-bit sequence number, not the raw combined field -- otherwise
+    # every unfragmented frame (the overwhelming majority) looks like it
+    # skipped 15 sequence numbers when it didn't.
+    seq_num = seq_ctrl >> 4
+    fragment_num = seq_ctrl & 0xF
     core_stream = struct.unpack("<H", payload[off:off + 2])[0]
     off += 2
     core = core_stream & 0x7
@@ -303,7 +312,7 @@ def decode_frame_payload(payload: bytes, index: int, ts: float, chip: str,
         index=index, ts=ts, src_mac=src_mac, seq_num=seq_num, core=core,
         spatial_stream=spatial_stream, chanspec=chanspec,
         chip_version=chip_version, csi=csi, rssi=rssi,
-        frame_control=frame_control, raw_len=len(payload),
+        frame_control=frame_control, fragment_num=fragment_num, raw_len=len(payload),
     )
 
 

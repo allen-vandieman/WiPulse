@@ -31,6 +31,8 @@ class CSIDataset:
     csi: np.ndarray          # complex128, shape (n_packets, nfft)
     ts: np.ndarray           # float64, shape (n_packets,) capture timestamps
     seq_num: np.ndarray      # uint16, shape (n_packets,)
+    core: np.ndarray         # uint8, shape (n_packets,)
+    spatial_stream: np.ndarray  # uint8, shape (n_packets,)
     nfft: int
     fs_est: float             # estimated sample rate (packets/sec), from ts
 
@@ -57,6 +59,8 @@ def build_dataset(frames: List[CSIFrame]) -> CSIDataset:
     csi = np.stack([f.csi for f in frames], axis=0)
     ts = np.array([f.ts for f in frames], dtype=np.float64)
     seq_num = np.array([f.seq_num for f in frames], dtype=np.uint32)
+    core = np.array([f.core for f in frames], dtype=np.uint8)
+    spatial_stream = np.array([f.spatial_stream for f in frames], dtype=np.uint8)
 
     duration = ts[-1] - ts[0] if len(ts) > 1 else 0.0
     fs_est = (len(ts) - 1) / duration if duration > 0 else 0.0
@@ -64,7 +68,41 @@ def build_dataset(frames: List[CSIFrame]) -> CSIDataset:
     logger.info("Built dataset: %d packets x %d subcarriers, est. rate %.2f pkt/s",
                 csi.shape[0], nfft, fs_est)
 
-    return CSIDataset(csi=csi, ts=ts, seq_num=seq_num, nfft=nfft, fs_est=fs_est)
+    return CSIDataset(csi=csi, ts=ts, seq_num=seq_num, core=core,
+                       spatial_stream=spatial_stream, nfft=nfft, fs_est=fs_est)
+
+
+def stream_breakdown(dataset: CSIDataset) -> dict:
+    """
+    Count packets per (core, spatial_stream) combination.
+
+    A single nexmon_csi config normally reports one CSI sample per triggering
+    frame per configured (core, stream) pair. If more than one combination
+    shows up with substantial counts, your capture almost certainly interleaves
+    multiple streams -- which will show up as systematic banding/bimodal jumps
+    in any plot that averages across all packets, and should usually be split
+    apart (see analysis.select_stream) before doing time-series or FFT analysis.
+    """
+    combos = {}
+    for c, s in zip(dataset.core.tolist(), dataset.spatial_stream.tolist()):
+        combos[(c, s)] = combos.get((c, s), 0) + 1
+    return dict(sorted(combos.items(), key=lambda kv: -kv[1]))
+
+
+def select_stream(dataset: CSIDataset, core: int, spatial_stream: int) -> CSIDataset:
+    """Return a new CSIDataset containing only packets from the given (core, spatial_stream)."""
+    mask = (dataset.core == core) & (dataset.spatial_stream == spatial_stream)
+    if not np.any(mask):
+        raise ValueError(f"No packets found for core={core}, spatial_stream={spatial_stream}. "
+                          f"Available combos: {stream_breakdown(dataset)}")
+    ts = dataset.ts[mask]
+    duration = ts[-1] - ts[0] if len(ts) > 1 else 0.0
+    fs_est = (len(ts) - 1) / duration if duration > 0 else 0.0
+    return CSIDataset(
+        csi=dataset.csi[mask], ts=ts, seq_num=dataset.seq_num[mask],
+        core=dataset.core[mask], spatial_stream=dataset.spatial_stream[mask],
+        nfft=dataset.nfft, fs_est=fs_est,
+    )
 
 
 def report_sequence_gaps(dataset: CSIDataset) -> dict:
