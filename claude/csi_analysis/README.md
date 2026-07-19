@@ -188,3 +188,40 @@ combination before doing time-series/FFT/motion analysis. When multiple
 streams share a capture, `duplicate_or_reordered` will also look inflated,
 since packets from different streams triggered by the same underlying
 Wi-Fi frame legitimately carry the same sequence number.
+
+## Live monitoring
+
+For a real-time terminal dashboard instead of capture-then-analyze:
+
+```bash
+sudo python live_monitor.py --iface wlan0 --chip 43455c0 --bw 80
+```
+
+(Needs root/`CAP_NET_RAW`, same as `tcpdump` -- it's a live raw capture.)
+
+Shows, updated live:
+- packets seen/decoded/errors and live packet rate
+- the latest packet's sequence number, core/stream, RSSI, chanspec
+- current mean amplitude and phase
+- a scrolling amplitude sparkline (auto-scaled trend over the last N packets)
+- a per-subcarrier sparkline of the *current* packet (a quick "shape" check --
+  should look similar in shape to your MATLAB `plotcsi` traces)
+- a rolling motion score, compared against an early baseline, with a
+  **`** MOTION / CHANGE DETECTED **`** flag once it exceeds
+  `--motion-threshold` times the baseline
+
+Press `q` to quit (or Ctrl+C).
+
+Useful flags:
+- `--select-core N --select-stream M` -- if your capture interleaves
+  multiple streams (see the "Core / spatial-stream breakdown" note above),
+  restrict the live view to just one for a clean signal.
+- `--window` -- how many recent packets the motion score and sparkline
+  are computed over (default 100).
+- `--motion-threshold` -- how many times over baseline the motion score
+  needs to be to trigger the alert (default 1.5x).
+- `--src-ip ''` -- disable the `10.10.10.10` source filter if needed.
+
+This reuses the exact same `decoder.decode_frame_payload()` as `main.py`,
+so any chip/header-format/bandwidth settings that work for your pcap
+captures will work here too.
