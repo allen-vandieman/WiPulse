@@ -179,9 +179,14 @@ sudo systemctl restart NetworkManager
 ### Transmiter
 
 ```bash
+# Monitor not working
 sudo iw dev wlan0 set power_save off
 sudo systemctl stop NetworkManager
 sudo pkill wpa_supplicant
+
+# Wifi not working
+sudo systemctl restart wpa_supplicant
+sudo systemctl restart NetworkManager
 ```
 
 ### Extractor
