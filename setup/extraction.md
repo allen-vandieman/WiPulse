@@ -83,7 +83,23 @@ sudo nmcli con up AP
 cd ~/nexmon
 source setup_env.sh
 cd $NEXMON_ROOT/patches/bcm43455c0/7_45_189/nexmon_csi
+```
 
+- Make sure these are dead
+
+```bash
+# kill these
+sudo systemctl stop NetworkManager
+sudo systemctl stop wpa_supplicant
+
+# Make sure
+systemctl is-active NetworkManager
+systemctl is-active wpa_supplicant
+```
+
+- Only continue once dead
+
+```bash
 # Kill wlan0
 sudo ifconfig wlan0 down
 
@@ -102,12 +118,6 @@ sudo ifconfig wlan0 up
 sudo nexutil -Iwlan0 -m1
 # Verify monitor
 nexutil -m
-# bring up wlan0 (make sure its up)
-sudo ifconfig wlan0 up
-# Quick test to see if it is up
-sudo tcpdump -i wlan0
-
-# If tcpdump fail, wlan0 was not working proper before Makefile.rpi reload-full
 ```
 
 ### Configure
@@ -140,17 +150,27 @@ sudo tcpdump -i wlan0 dst port 5500 -vv
 sudo tcpdump -i wlan0 udp port 5500 -w csi_capture.pcap
 ```
 
+- Debug
+
+```bash
+# bring up wlan0 (make sure its up)
+sudo ifconfig wlan0 up
+# Quick test to see if it is up
+sudo tcpdump -i wlan0
+
+# If tcpdump fail, wlan0 was not working proper before Makefile.rpi reload-full
+```
+
 ### Python Stuff
 
 ```bash
-# Create python enviroment
+# Create NEW python enviroment
 python3 -m venv csi_env
-# Activate
+# Activate enviroment
 source csi_env/bin/activate
 
-# Then
+# Then head to working folder
 cd WiPulse/claude/csi_analysis/
-
 
 # Do stuff
 pip install --upgrade pip
