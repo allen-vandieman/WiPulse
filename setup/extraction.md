@@ -16,6 +16,7 @@ Content
     1. [Transmitter](#transmiter)
     1. [Extractor](#extractor-1)
         1. [Debug Monitor](#debug-monitor)
+    1. [Common](#common)
 
 ## Find Channel
 
@@ -139,6 +140,29 @@ sudo tcpdump -i wlan0 dst port 5500 -vv
 sudo tcpdump -i wlan0 udp port 5500 -w csi_capture.pcap
 ```
 
+### Python Stuff
+
+```bash
+# Create python enviroment
+python3 -m venv csi_env
+# Activate
+source csi_env/bin/activate
+
+# Then
+cd WiPulse/claude/csi_analysis/
+
+
+# Do stuff
+pip install --upgrade pip
+pip install "numpy>=2.0" "scapy>=2.5" "pandas>=2.2"
+python3 -c "import numpy, scapy, pandas; print(f'NumPy: {numpy.__version__}\nScapy: {scapy.__version__}\nPandas: {pandas.__version__}')"
+
+python3 main.py ../../csi_capture.pcap
+
+# Leave enviroment
+deactivate
+```
+
 ### Unload
 
 ```bash
@@ -155,9 +179,14 @@ sudo systemctl restart NetworkManager
 ### Transmiter
 
 ```bash
+# Monitor not working
 sudo iw dev wlan0 set power_save off
 sudo systemctl stop NetworkManager
 sudo pkill wpa_supplicant
+
+# Wifi not working
+sudo systemctl restart wpa_supplicant
+sudo systemctl restart NetworkManager
 ```
 
 ### Extractor
@@ -180,4 +209,48 @@ sudo systemctl restart NetworkManager
 sudo nexutil -k6/20          # match AP_CHANNEL above
 sudo nexutil -m1
 iw dev
+```
+
+### Common
+
+```bash
+# Check RF-kill status
+# list all
+rfkill list
+# unblock wifi
+sudo rfkill unblock wifi
+# or unblock all
+sudo rfkill unblock all
+
+#Ensure no service is blocking it
+sudo systemctl stop wpa_supplicant
+sudo systemctl stop dhcpcd
+sudo systemctl status wpa_supplicant
+sudo systemctl status dhcpcd
+```
+
+- More
+
+```bash
+# More options
+
+nmcli device wifi rescan
+nmcli device wifi list
+
+# Querry device
+nmcli radio
+
+# Switch device on
+nmcli radio wifi on
+
+# ! run in order
+rfkill unblock wifi
+nmcli radio wifi on
+nmcli device wifi rescan
+nmcli device wifi list
+
+# On error force rescan
+sudo nmcli device wifi rescan
+sleep 3
+nmcli device wifi list
 ```

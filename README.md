@@ -55,3 +55,27 @@ Progress thus far:
 1. [Setup TX](tx/setup.md)
 1. [Setup RX](rx/setup.md)
 1. [Setup Extraction](setup/extraction.md)
+
+## Learning Thus Far
+
+### OSI Model
+Looking at the OSI model, working only with Application and media layers. Use and App to create frames.
+![Progress](img/capture_work/OSI%20model.jpg)
+
+### Hardware
+How the OS uses drivers to interface firmware that use hardware
+![Progress](img/capture_work/description.png)
+
+- Why i pathch firmware and drivers
+![Progress](img/capture_work/work.PNG)
+
+- Result
+![Progress](img/capture_work/workflow.png)
+
+### Frames
+
+How my frames are created
+![Progress](img/capture_work/frames2air.png)
+
+How my frames are placed on the air
+![Progress](img/capture_work/frames2air2scripts.png)
