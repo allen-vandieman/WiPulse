@@ -274,3 +274,70 @@ sudo nmcli device wifi rescan
 sleep 3
 nmcli device wifi list
 ```
+
+Monitor what kernel and driver is doing
+
+```bash
+echo $?
+
+sudo dmesg | tail -50
+
+dmesg | grep -i brcm
+
+rfkill list
+
+iw dev
+
+ip link
+
+
+
+iw dev
+nmcli device status
+ps aux | grep wpa
+
+# From here
+sudo dmesg | tail -50
+sudo dmesg -w
+
+sudo dmesg -w | grep -iE 'brcm|firmware|phy'
+
+# This trace slowed the driver down engough to crash and reload
+sudo strace -f -o nexutil.trace \
+nexutil -Iwlan0 -s500 -b -l34
+
+tail -100 nexutil.trace
+```
+
+
+Last reload driver
+
+```bash
+# Try
+
+sudo ip link set wlan0 down
+sudo modprobe -r brcmfmac_wcc brcmfmac_cyw brcmfmac
+sleep 1
+sudo modprobe brcmfmac
+sudo ip link set wlan0 up
+
+# Or
+sudo ip link set wlan0 down
+sudo systemctl stop NetworkManager wpa_supplicant
+sudo modprobe -r brcmfmac_wcc brcmfmac_cyw brcmfmac
+sudo modprobe brcmfmac
+
+# Or
+sudo modprobe -r brcmfmac_wcc brcmfmac_cyw brcmfmac
+sudo modprobe brcmfmac
+
+# Verify
+dmesg | tail -30
+iw dev
+
+
+# Danger try
+echo 1 | sudo tee /sys/bus/mmc/devices/mmc1:0001:1/remove
+# Then
+echo 1 | sudo tee /sys/bus/mmc/rescan
+```
