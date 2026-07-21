@@ -2,8 +2,8 @@
 
 WiPulse - Contactless Vital Sign Extraction
 
-[Setup](/setup/README.md)
-[Extraction App](/app/README.md)
+1. [Setup](/setup/README.md)
+1. [Extraction App](/app/README.md)
 
 ## Contents
 
@@ -63,9 +63,17 @@ Progress thus far:
 
 ![Progress](img/Progress.jpg)
 
-1. [Setup TX](tx/setup.md)
-1. [Setup RX](rx/setup.md)
-1. [Setup Extraction](setup/extraction.md)
+- Setup
+
+1. [Setup](/setup/README.md)
+1. [Extraction App](/app/README.md)
+
+- Notes
+
+1. [TX](/notes/tx/README.md)
+1. [RX](/notes/rx/README.md)
+1. [Extraction](/notes/extraction.md)
+1. [channels](/notes/channels.md)
 
 ## Learning Thus Far
 
