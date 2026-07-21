@@ -29,6 +29,12 @@ sudo airodump-ng wlan0mon
 
 # Search specific channel
 sudo airodump-ng --channel 36 wlan0mon
+
+# Check just the 5G channels or band a
+sudo airodump-ng --band a wlan0mon
+
+# Check specific channels
+sudo airodump-ng -c 36,40,44,48 wlan0mon
 ```
 
 ## Transmitter

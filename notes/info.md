@@ -60,3 +60,13 @@ In 802.11ac/ax terminology, this is the 80 MHz channel block centered at 5210 MH
 | Example ||
 | 80 MHz | channel width.|
 | VHT80 | 802.11ac mode using an 80 MHz width.|
+
+## Check Channels
+
+```bash
+# Check just the 5G channels or band a
+sudo airodump-ng --band a wlan0mon
+
+# Check specific channels
+sudo airodump-ng -c 36,40,44,48 wlan0mon
+```
