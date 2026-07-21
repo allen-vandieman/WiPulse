@@ -31,6 +31,7 @@ from typing import Optional
 import numpy as np
 
 from decoder import decode_frame_payload, DecodeError, CHIP_TABLE, BW_TO_NFFT
+from filters import hampel_filter
 
 logger = logging.getLogger("csi_analysis.live_monitor")
 
@@ -189,26 +190,39 @@ def run_curses(stdscr, args):
                 put(6, f"current mean amplitude: {float(np.mean(amp)):10.2f}")
                 put(7, f"current mean phase:     {float(np.mean(ph)):10.2f} deg")
 
-                put(9, f"amplitude trend (last {len(state.mean_amp_hist)} pkts):")
+                put(9, f"amplitude trend (last {len(state.mean_amp_hist)} pkts, raw):")
                 put(10, sparkline(state.mean_amp_hist, width=min(60, w - 2)))
 
-                put(12, "current subcarrier profile (this packet):")
-                put(13, sparkline(np.fft.fftshift(amp), width=min(60, w - 2)))
+                if args.hampel:
+                    put(11, f"amplitude trend (last {len(state.mean_amp_hist)} pkts, "
+                            f"hampel-filtered window={args.hampel_window} sigmas={args.hampel_sigmas}):")
+                    if len(state.mean_amp_hist) >= 5:
+                        filtered_hist = hampel_filter(
+                            np.array(state.mean_amp_hist, dtype=np.float64),
+                            window_size=args.hampel_window,
+                            n_sigmas=args.hampel_sigmas,
+                        )
+                        put(12, sparkline(filtered_hist, width=min(60, w - 2)))
+                    else:
+                        put(12, "(warming up...)")
+
+                put(14, "current subcarrier profile (this packet):")
+                put(15, sparkline(np.fft.fftshift(amp), width=min(60, w - 2)))
 
                 ms = state.motion_score()
                 if ms is not None:
                     if baseline_motion is None and len(state.mean_amp_hist) >= baseline_needed:
                         baseline_motion = ms
-                    put(15, f"motion score (rolling {args.window}-pkt window): {ms:.5f}")
+                    put(17, f"motion score (rolling {args.window}-pkt window): {ms:.5f}")
                     if baseline_motion:
                         ratio = ms / baseline_motion if baseline_motion > 0 else 0
-                        put(16, f"  vs baseline: {ratio:5.2f}x")
+                        put(18, f"  vs baseline: {ratio:5.2f}x")
                         if ratio > args.motion_threshold:
                             stdscr.attron(curses.A_BOLD)
-                            put(17, "  ** MOTION / CHANGE DETECTED **")
+                            put(19, "  ** MOTION / CHANGE DETECTED **")
                             stdscr.attroff(curses.A_BOLD)
                 else:
-                    put(15, f"motion score: (warming up, need {baseline_needed} packets)")
+                    put(17, f"motion score: (warming up, need {baseline_needed} packets)")
             else:
                 put(4, "waiting for first CSI packet... (check --iface / --src-ip / that "
                        "the sender is actually running)")
@@ -236,6 +250,11 @@ def main(argv=None):
                          "capture interleaves multiple streams)")
     p.add_argument("--select-stream", type=int, default=None, help="Only show packets from this spatial stream")
     p.add_argument("--window", type=int, default=100, help="Rolling window size (packets) for motion score")
+    p.add_argument("--hampel", action="store_true",
+                    help="Show a second, Hampel-filtered amplitude trend line alongside the raw one "
+                         "(knocks out isolated spike artifacts; same filter as main.py --hampel)")
+    p.add_argument("--hampel-window", type=int, default=7, help="Hampel filter window size (packets)")
+    p.add_argument("--hampel-sigmas", type=float, default=3.0, help="Hampel filter outlier threshold (sigmas)")
     p.add_argument("--baseline-window", type=int, default=None,
                     help="Packets to average for the motion-score baseline (default: same as --window)")
     p.add_argument("--motion-threshold", type=float, default=1.5,
