@@ -1,6 +1,10 @@
 # RX
 
-Contents
+Setup Debian Linux on raspberry pi for CSI pi.
+
+Setup Kali Linux for RSSI pi.
+
+# Contents
 
 1. [Setup](#setup)
     1. [Patch Kernel](#patch-kernel)

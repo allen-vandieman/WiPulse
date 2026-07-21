@@ -11,7 +11,7 @@ clear all
 %% configuration
 CHIP = '43455c0';          % wifi chip (possible values 4339, 4358, 43455c0, 4366c0)
 BW = 80;                % bandwidth
-FILE = '..\captures\csi_capture.pcap';% capture file
+FILE = 'captures\csi_capture.pcap';% capture file
 NPKTS_MAX = 10000;       % max number of UDPs to process
 
 %% read file
@@ -52,7 +52,23 @@ while (k <= n)
 end
 
 %% plot
-plotcsi(csi_buff, NFFT, false)
+csi = fftshift(csi_buff,2);
+
+figure
+imagesc(abs(csi))
+xlabel('Subcarrier')
+ylabel('Packet')
+title('CSI Amplitude')
+colorbar
 
 
+amp = abs(csi);
 
+variance = var(amp,0,1);
+
+figure
+plot(variance,'LineWidth',2)
+grid on
+xlabel('Subcarrier')
+ylabel('Variance')
+title('CSI Variance')

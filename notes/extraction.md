@@ -29,6 +29,12 @@ sudo airodump-ng wlan0mon
 
 # Search specific channel
 sudo airodump-ng --channel 36 wlan0mon
+
+# Check just the 5G channels or band a
+sudo airodump-ng --band a wlan0mon
+
+# Check specific channels
+sudo airodump-ng -c 36,40,44,48 wlan0mon
 ```
 
 ## Transmitter
@@ -83,7 +89,23 @@ sudo nmcli con up AP
 cd ~/nexmon
 source setup_env.sh
 cd $NEXMON_ROOT/patches/bcm43455c0/7_45_189/nexmon_csi
+```
 
+- Make sure these are dead
+
+```bash
+# kill these
+sudo systemctl stop NetworkManager
+sudo systemctl stop wpa_supplicant
+
+# Make sure
+systemctl is-active NetworkManager
+systemctl is-active wpa_supplicant
+```
+
+- Only continue once dead
+
+```bash
 # Kill wlan0
 sudo ifconfig wlan0 down
 
@@ -102,12 +124,6 @@ sudo ifconfig wlan0 up
 sudo nexutil -Iwlan0 -m1
 # Verify monitor
 nexutil -m
-# bring up wlan0 (make sure its up)
-sudo ifconfig wlan0 up
-# Quick test to see if it is up
-sudo tcpdump -i wlan0
-
-# If tcpdump fail, wlan0 was not working proper before Makefile.rpi reload-full
 ```
 
 ### Configure
@@ -140,17 +156,27 @@ sudo tcpdump -i wlan0 dst port 5500 -vv
 sudo tcpdump -i wlan0 udp port 5500 -w csi_capture.pcap
 ```
 
+- Debug
+
+```bash
+# bring up wlan0 (make sure its up)
+sudo ifconfig wlan0 up
+# Quick test to see if it is up
+sudo tcpdump -i wlan0
+
+# If tcpdump fail, wlan0 was not working proper before Makefile.rpi reload-full
+```
+
 ### Python Stuff
 
 ```bash
-# Create python enviroment
+# Create NEW python enviroment
 python3 -m venv csi_env
-# Activate
+# Activate enviroment
 source csi_env/bin/activate
 
-# Then
+# Then head to working folder
 cd WiPulse/claude/csi_analysis/
-
 
 # Do stuff
 pip install --upgrade pip
@@ -253,4 +279,71 @@ nmcli device wifi list
 sudo nmcli device wifi rescan
 sleep 3
 nmcli device wifi list
+```
+
+Monitor what kernel and driver is doing
+
+```bash
+echo $?
+
+sudo dmesg | tail -50
+
+dmesg | grep -i brcm
+
+rfkill list
+
+iw dev
+
+ip link
+
+
+
+iw dev
+nmcli device status
+ps aux | grep wpa
+
+# From here
+sudo dmesg | tail -50
+sudo dmesg -w
+
+sudo dmesg -w | grep -iE 'brcm|firmware|phy'
+
+# This trace slowed the driver down engough to crash and reload
+sudo strace -f -o nexutil.trace \
+nexutil -Iwlan0 -s500 -b -l34
+
+tail -100 nexutil.trace
+```
+
+
+Last reload driver
+
+```bash
+# Try
+
+sudo ip link set wlan0 down
+sudo modprobe -r brcmfmac_wcc brcmfmac_cyw brcmfmac
+sleep 1
+sudo modprobe brcmfmac
+sudo ip link set wlan0 up
+
+# Or
+sudo ip link set wlan0 down
+sudo systemctl stop NetworkManager wpa_supplicant
+sudo modprobe -r brcmfmac_wcc brcmfmac_cyw brcmfmac
+sudo modprobe brcmfmac
+
+# Or
+sudo modprobe -r brcmfmac_wcc brcmfmac_cyw brcmfmac
+sudo modprobe brcmfmac
+
+# Verify
+dmesg | tail -30
+iw dev
+
+
+# Danger try
+echo 1 | sudo tee /sys/bus/mmc/devices/mmc1:0001:1/remove
+# Then
+echo 1 | sudo tee /sys/bus/mmc/rescan
 ```

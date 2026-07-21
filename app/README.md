@@ -197,6 +197,12 @@ For a real-time terminal dashboard instead of capture-then-analyze:
 sudo python live_monitor.py --iface wlan0 --chip 43455c0 --bw 80
 ```
 
+Live view with filter
+
+```bash
+sudo python live_monitor.py --iface wlan0 --chip 43455c0 --bw 80 --hampel
+```
+
 (Needs root/`CAP_NET_RAW`, same as `tcpdump` -- it's a live raw capture.)
 
 Shows, updated live:
