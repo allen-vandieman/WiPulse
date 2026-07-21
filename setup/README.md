@@ -13,6 +13,9 @@ sudo airmon-ng start wlan0
 Find a nice channel
 
 ```bash
+# Pre-patch
+nmcli device wifi list
+
 # Use airmon on all channels
 sudo airodump-ng wlan0mon
 
@@ -64,14 +67,6 @@ sudo nexutil -Iwlan0 -s500 -b -l34 -v$CSIPARAMS
 sudo tcpdump -i wlan0 udp port 5500 -w csi_capture.pcap
 ```
 
-### Reload driver
-
-```bash
-cd $NEXMON_ROOT/patches/bcm43455c0/7_45_189/nexmon_csi
-
-make -f Makefile.rpi reload-full
-```
-
 ### Verify
 
 ```bash
@@ -80,4 +75,12 @@ sudo tcpdump -i wlan0
 echo "Generated params: $CSIPARAMS"
 lsmod | grep brcm
 iw dev
+```
+
+### Reload driver
+
+```bash
+cd $NEXMON_ROOT/patches/bcm43455c0/7_45_189/nexmon_csi
+
+make -f Makefile.rpi reload-full
 ```

@@ -2,7 +2,7 @@
 
 WiPulse - Contactless Vital Sign Extraction
 
-[Start here](/setup/extraction.md)
+[Setup](/setup/README.md)
 
 ## Contents
 
@@ -10,6 +10,10 @@ WiPulse - Contactless Vital Sign Extraction
 1. [Goals](#goals)
 1. [Drawing](#drawing)
 1. [Progress](#progress)
+1. [Learming thus far](#learning-thus-far)
+    1. [OSI Model](#osi-model)
+    1. [Hardware](#hardware)
+    1. [Frames](#frames)
 
 
 ## Brief
