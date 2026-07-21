@@ -27,6 +27,16 @@ The center frequency is halfway across the 80 MHz block:
 
 So the center frequency is 5210 MHz.
 
+## What does 80 MHz actually give you?
+
+Think of bandwidth like this:
+
+| Bandwidth | Approx. useful OFDM subcarriers | CSI size |
+|--|:--:|--|
+|20 MHz| ~64 |	Small|
+|40 MHz| ~128 |	Medium|
+|80 MHz| ~256 |	Large|
+
 ## Summary
 
 | Setting |	Value |

@@ -1,6 +1,7 @@
 import csv
 import time
 from collections import deque
+from pathlib import Path
 from gpiozero import DigitalInputDevice
 from signal import pause
 
@@ -15,7 +16,11 @@ last_beat_time = None
 last_report_time = time.time()
 ibi_history = deque(maxlen=AVG_WINDOW)
 
-csvfile = open("ground_truth.csv", "w", newline="")
+output_dir = Path(__file__).resolve().parent / "output"
+output_dir.mkdir(exist_ok=True)
+csv_path = output_dir / "ground_truth.csv"
+
+csvfile = open(csv_path, "w", newline="")
 writer = csv.writer(csvfile)
 writer.writerow(["timestamp", "ibi_s", "instant_bpm", "avg_bpm"])
 
