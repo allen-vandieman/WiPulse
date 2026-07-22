@@ -83,6 +83,8 @@ Looking at the OSI model, working only with Application and media layers. Use an
 
 ### Hardware
 How the OS uses drivers to interface firmware that use hardware
+![Progress](img/capture_work/Flash.jpg)
+Details
 ![Progress](img/capture_work/description.png)
 
 - Why i pathch firmware and drivers
