@@ -5,6 +5,22 @@ captures (`sudo tcpdump -i wlan0 udp port 5500 -w csi_capture.pcap`) and
 validating that the extracted CSI actually reflects movement/obstacles in
 the environment.
 
+## Content
+
+1. [Layout](#layout)
+1. [Setup](#setup)
+1. [Chip](#chip--bandwidth)
+1. [Header format](#header-format)
+1. [Validate the capture](#step-1--validate-the-capture-is-well-formed)
+1. [Look at it](#step-2--look-at-it)
+1. [Movement test](#step-3--the-movement-test)
+1. [Cleaning noisy data](#cleaning-noisy-data)
+1. [Exporting for ML](#exporting-for-ml)
+1. [Flags reference](#useful-flags-reference)
+1. [Loss/stream diagnostics](#reading-the-lossstream-diagnostics)
+1. [Live monitoring](#live-monitoring)
+1. [Ground Truth](#ground-truth-data)
+
 ## Layout
 
 ```
@@ -22,6 +38,13 @@ csi_analysis/
 ## Setup
 
 ```bash
+# Create an enviroment
+python3 -m venv csi_env
+
+# Activate the enviroment
+source test/bin/activate
+
+# Install pre-requirements to enviroment
 pip install -r requirements.txt
 ```
 
@@ -231,3 +254,11 @@ Useful flags:
 This reuses the exact same `decoder.decode_frame_payload()` as `main.py`,
 so any chip/header-format/bandwidth settings that work for your pcap
 captures will work here too.
+
+## Ground truth data
+
+```bash
+python3 heartbeat-giop.py
+```
+
+Use this to record timed heart-rate data to output directory. 

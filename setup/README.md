@@ -1,16 +1,6 @@
 # Setup CSI extractor
 
-## Transmiter
-
-Setup transmitter and tester Pi
-
-```bash
-sudo airmon-ng check kill
-sudo airmon-ng start wlan0
-# Run twice for loading error
-sudo airmon-ng start wlan0
-```
-Find a nice channel
+## Find a nice channel
 
 ```bash
 # Pre-patch
@@ -27,6 +17,17 @@ sudo airodump-ng --band a wlan0mon
 
 # Check specific channels
 sudo airodump-ng -c 36,40,44,48 wlan0mon
+```
+
+## Transmiter
+
+Setup transmitter and tester Pi
+
+```bash
+sudo airmon-ng check kill
+sudo airmon-ng start wlan0
+# Run twice for loading error
+sudo airmon-ng start wlan0
 ```
 
 Load Pi on that channel
@@ -66,6 +67,8 @@ sudo nexutil -Iwlan0 -s500 -b -l34 -v$CSIPARAMS
 ```bash
 sudo tcpdump -i wlan0 udp port 5500 -w csi_capture.pcap
 ```
+
+or use [app](/app/README.md).
 
 ### Verify
 

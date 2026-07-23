@@ -150,85 +150,88 @@ def run_curses(stdscr, args):
 
     try:
         while True:
-            ch = stdscr.getch()
-            if ch in (ord("q"), ord("Q")):
-                break
+            try:
+                ch = stdscr.getch()
+                if ch in (ord("q"), ord("Q")):
+                    break
 
-            if state.n_errors == -1:
+                if state.n_errors == -1:
+                    stdscr.erase()
+                    stdscr.addstr(0, 0, "Permission denied opening the interface for sniffing.")
+                    stdscr.addstr(1, 0, "Try running with sudo (raw capture needs CAP_NET_RAW).")
+                    stdscr.addstr(3, 0, "Press 'q' to quit.")
+                    stdscr.refresh()
+                    time.sleep(0.2)
+                    continue
+
                 stdscr.erase()
-                stdscr.addstr(0, 0, "Permission denied opening the interface for sniffing.")
-                stdscr.addstr(1, 0, "Try running with sudo (raw capture needs CAP_NET_RAW).")
-                stdscr.addstr(3, 0, "Press 'q' to quit.")
-                stdscr.refresh()
-                time.sleep(0.2)
-                continue
+                h, w = stdscr.getmaxyx()
+                w = max(w, 20)
 
-            stdscr.erase()
-            h, w = stdscr.getmaxyx()
-            w = max(w, 20)
+                def put(row, text):
+                    if 0 <= row < h - 1:
+                        stdscr.addstr(row, 0, text[: w - 1])
 
-            def put(row, text):
-                if 0 <= row < h - 1:
-                    stdscr.addstr(row, 0, text[: w - 1])
+                elapsed = time.time() - state.start_time
+                put(0, f"csi_analysis live monitor -- iface={args.iface} chip={args.chip} "
+                       f"bw={args.bw}MHz port={args.udp_port}  [q to quit]")
+                put(1, "-" * min(w - 1, 78))
+                put(2, f"elapsed: {elapsed:6.1f}s   seen: {state.n_seen:6d}   decoded: {state.n_decoded:6d}   "
+                       f"errors: {max(state.n_errors,0):4d}   live rate: {state.live_rate:5.1f} pkt/s")
 
-            elapsed = time.time() - state.start_time
-            put(0, f"csi_analysis live monitor -- iface={args.iface} chip={args.chip} "
-                   f"bw={args.bw}MHz port={args.udp_port}  [q to quit]")
-            put(1, "-" * min(w - 1, 78))
-            put(2, f"elapsed: {elapsed:6.1f}s   seen: {state.n_seen:6d}   decoded: {state.n_decoded:6d}   "
-                   f"errors: {max(state.n_errors,0):4d}   live rate: {state.live_rate:5.1f} pkt/s")
+                frame = state.last_frame
+                if frame is not None:
+                    rssi_str = f"{frame.rssi} dBm" if frame.rssi is not None else "n/a"
+                    put(4, f"last packet -- seq={frame.seq_num:5d}  core={frame.core}  "
+                           f"stream={frame.spatial_stream}  rssi={rssi_str}  "
+                           f"chanspec=0x{frame.chanspec:04x}")
 
-            frame = state.last_frame
-            if frame is not None:
-                rssi_str = f"{frame.rssi} dBm" if frame.rssi is not None else "n/a"
-                put(4, f"last packet -- seq={frame.seq_num:5d}  core={frame.core}  "
-                       f"stream={frame.spatial_stream}  rssi={rssi_str}  "
-                       f"chanspec=0x{frame.chanspec:04x}")
+                    amp = np.abs(frame.csi)
+                    ph = np.angle(frame.csi, deg=True)
+                    put(6, f"current mean amplitude: {float(np.mean(amp)):10.2f}")
+                    put(7, f"current mean phase:     {float(np.mean(ph)):10.2f} deg")
 
-                amp = np.abs(frame.csi)
-                ph = np.angle(frame.csi, deg=True)
-                put(6, f"current mean amplitude: {float(np.mean(amp)):10.2f}")
-                put(7, f"current mean phase:     {float(np.mean(ph)):10.2f} deg")
+                    put(9, f"amplitude trend (last {len(state.mean_amp_hist)} pkts, raw):")
+                    put(10, sparkline(state.mean_amp_hist, width=min(60, w - 2)))
 
-                put(9, f"amplitude trend (last {len(state.mean_amp_hist)} pkts, raw):")
-                put(10, sparkline(state.mean_amp_hist, width=min(60, w - 2)))
+                    if args.hampel:
+                        put(11, f"amplitude trend (last {len(state.mean_amp_hist)} pkts, "
+                                f"hampel-filtered window={args.hampel_window} sigmas={args.hampel_sigmas}):")
+                        if len(state.mean_amp_hist) >= 5:
+                            filtered_hist = hampel_filter(
+                                np.array(state.mean_amp_hist, dtype=np.float64),
+                                window_size=args.hampel_window,
+                                n_sigmas=args.hampel_sigmas,
+                            )
+                            put(12, sparkline(filtered_hist, width=min(60, w - 2)))
+                        else:
+                            put(12, "(warming up...)")
 
-                if args.hampel:
-                    put(11, f"amplitude trend (last {len(state.mean_amp_hist)} pkts, "
-                            f"hampel-filtered window={args.hampel_window} sigmas={args.hampel_sigmas}):")
-                    if len(state.mean_amp_hist) >= 5:
-                        filtered_hist = hampel_filter(
-                            np.array(state.mean_amp_hist, dtype=np.float64),
-                            window_size=args.hampel_window,
-                            n_sigmas=args.hampel_sigmas,
-                        )
-                        put(12, sparkline(filtered_hist, width=min(60, w - 2)))
+                    put(14, "current subcarrier profile (this packet):")
+                    put(15, sparkline(np.fft.fftshift(amp), width=min(60, w - 2)))
+
+                    ms = state.motion_score()
+                    if ms is not None:
+                        if baseline_motion is None and len(state.mean_amp_hist) >= baseline_needed:
+                            baseline_motion = ms
+                        put(17, f"motion score (rolling {args.window}-pkt window): {ms:.5f}")
+                        if baseline_motion:
+                            ratio = ms / baseline_motion if baseline_motion > 0 else 0
+                            put(18, f"  vs baseline: {ratio:5.2f}x")
+                            if ratio > args.motion_threshold:
+                                stdscr.attron(curses.A_BOLD)
+                                put(19, "  ** MOTION / CHANGE DETECTED **")
+                                stdscr.attroff(curses.A_BOLD)
                     else:
-                        put(12, "(warming up...)")
-
-                put(14, "current subcarrier profile (this packet):")
-                put(15, sparkline(np.fft.fftshift(amp), width=min(60, w - 2)))
-
-                ms = state.motion_score()
-                if ms is not None:
-                    if baseline_motion is None and len(state.mean_amp_hist) >= baseline_needed:
-                        baseline_motion = ms
-                    put(17, f"motion score (rolling {args.window}-pkt window): {ms:.5f}")
-                    if baseline_motion:
-                        ratio = ms / baseline_motion if baseline_motion > 0 else 0
-                        put(18, f"  vs baseline: {ratio:5.2f}x")
-                        if ratio > args.motion_threshold:
-                            stdscr.attron(curses.A_BOLD)
-                            put(19, "  ** MOTION / CHANGE DETECTED **")
-                            stdscr.attroff(curses.A_BOLD)
+                        put(17, f"motion score: (warming up, need {baseline_needed} packets)")
                 else:
-                    put(17, f"motion score: (warming up, need {baseline_needed} packets)")
-            else:
-                put(4, "waiting for first CSI packet... (check --iface / --src-ip / that "
-                       "the sender is actually running)")
+                    put(4, "waiting for first CSI packet... (check --iface / --src-ip / that "
+                           "the sender is actually running)")
 
-            stdscr.refresh()
-            time.sleep(max(0.0, 1.0 / args.refresh_hz))
+                stdscr.refresh()
+                time.sleep(max(0.0, 1.0 / args.refresh_hz))
+            except KeyboardInterrupt:
+                break
     finally:
         stop_flag.set()
 
