@@ -19,6 +19,7 @@ the environment.
 1. [Flags reference](#useful-flags-reference)
 1. [Loss/stream diagnostics](#reading-the-lossstream-diagnostics)
 1. [Live monitoring](#live-monitoring)
+1. [Ground Truth](#ground-truth-data)
 
 ## Layout
 
@@ -253,3 +254,11 @@ Useful flags:
 This reuses the exact same `decoder.decode_frame_payload()` as `main.py`,
 so any chip/header-format/bandwidth settings that work for your pcap
 captures will work here too.
+
+## Ground truth data
+
+```bash
+python3 heartbeat-giop.py
+```
+
+Use this to record timed heart-rate data to output directory. 
