@@ -15,17 +15,21 @@ Usage:
     sudo python live_monitor.py --iface wlan0 --chip 43455c0 --bw 80
 
 Needs root (or CAP_NET_RAW), same as tcpdump/scapy sniffing normally does.
-Press 'q' to quit (or Ctrl+C).
+Press 'q' to quit (or Ctrl+C). Press 'c' to start/stop recording decoded CSI
+to a timestamped CSV in --output-dir (default: an 'output/' folder next to
+this script -- the same one heartbeat-giop.py writes ground_truth.csv to).
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import curses
 import logging
 import threading
 import time
 from collections import deque
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -36,6 +40,108 @@ from filters import hampel_filter
 logger = logging.getLogger("csi_analysis.live_monitor")
 
 SPARK_CHARS = "▁▂▃▄▅▆▇█"
+
+
+class CSICapture:
+    """
+    Handles writing live CSI frames to CSV, toggled on/off with the 'c' key.
+
+    Deliberately mirrors heartbeat-giop.py's conventions so the two data
+    streams can be fed into the same ML pipeline afterwards:
+      - writes into a sibling "output/" directory next to this script (the
+        same folder heartbeat-giop.py uses when run from the same repo),
+        so both land side-by-side without extra setup
+      - timestamps are raw time.time() epoch seconds formatted to 3
+        decimals ("%.3f"), same as heartbeat-giop.py's ground_truth.csv --
+        that's what lets you align/interpolate the two time series later
+      - one row per packet, flushed periodically (not on every single row --
+        CSI arrives far faster than heartbeats, so flushing every row would
+        add real I/O overhead at 100+ Hz)
+
+    CSV layout (mode="amplitude", the default):
+        ts, seq_num, core, spatial_stream, sc0_amp, sc1_amp, ..., sc{nfft-1}_amp
+    Subcarriers are written in raw decode order (NOT fftshifted), matching
+    utils.save_csv()/main.py's --save-csv export, so a live capture and an
+    offline pcap export are directly comparable column-for-column.
+    """
+
+    def __init__(self, out_dir: Path, nfft: int, mode: str = "amplitude", flush_every: int = 20):
+        self.out_dir = out_dir
+        self.nfft = nfft
+        self.mode = mode
+        self.flush_every = max(1, flush_every)
+        self.lock = threading.Lock()
+        self.file = None
+        self.writer = None
+        self.path: Optional[Path] = None
+        self.n_written = 0
+        self.active = False
+
+    def _header(self):
+        header = ["ts", "seq_num", "core", "spatial_stream"]
+        if self.mode == "complex":
+            for i in range(self.nfft):
+                header += [f"sc{i}_re", f"sc{i}_im"]
+        else:
+            suffix = "amp" if self.mode == "amplitude" else "pha"
+            header += [f"sc{i}_{suffix}" for i in range(self.nfft)]
+        return header
+
+    def start(self) -> Path:
+        """Open a new timestamped CSV file and start writing. Idempotent while active."""
+        with self.lock:
+            if self.active:
+                return self.path
+            self.out_dir.mkdir(exist_ok=True)
+            ts_tag = time.strftime("%Y%m%d_%H%M%S")
+            self.path = self.out_dir / f"csi_capture_{ts_tag}.csv"
+            self.file = open(self.path, "w", newline="")
+            self.writer = csv.writer(self.file)
+            self.writer.writerow(self._header())
+            self.n_written = 0
+            self.active = True
+            return self.path
+
+    def stop(self):
+        """Flush and close the current file, if any."""
+        with self.lock:
+            if not self.active:
+                return
+            self.active = False
+            if self.file is not None:
+                self.file.flush()
+                self.file.close()
+            self.file = None
+            self.writer = None
+
+    def toggle(self):
+        if self.active:
+            self.stop()
+            return False
+        else:
+            self.start()
+            return True
+
+    def write_frame(self, frame):
+        """Write one decoded CSI frame as a CSV row, if capture is active."""
+        with self.lock:
+            if not self.active or self.writer is None:
+                return
+            row = [f"{frame.ts:.3f}", int(frame.seq_num), int(frame.core), int(frame.spatial_stream)]
+            if self.mode == "complex":
+                for v in frame.csi:
+                    row += [v.real, v.imag]
+            elif self.mode == "amplitude":
+                row += list(np.abs(frame.csi))
+            else:
+                row += list(np.angle(frame.csi))
+            self.writer.writerow(row)
+            self.n_written += 1
+            if self.n_written % self.flush_every == 0:
+                self.file.flush()
+
+    def close(self):
+        self.stop()
 
 
 def sparkline(values, width: int = 40) -> str:
@@ -52,7 +158,7 @@ def sparkline(values, width: int = 40) -> str:
 class LiveState:
     """Rolling buffers + counters updated from the sniff callback thread."""
 
-    def __init__(self, window: int):
+    def __init__(self, window: int, capture: Optional["CSICapture"] = None):
         self.window = window
         self.mean_amp_hist = deque(maxlen=window)
         self.per_sc_amp_hist = deque(maxlen=window)
@@ -63,6 +169,7 @@ class LiveState:
         self.start_time = time.time()
         self.pkt_times = deque(maxlen=50)
         self.lock = threading.Lock()
+        self.capture = capture  # CSICapture instance; writes are a no-op while inactive
 
     def update(self, frame):
         amp = np.abs(frame.csi)
@@ -73,6 +180,10 @@ class LiveState:
             self.pkt_times.append(now)
             self.mean_amp_hist.append(float(np.mean(amp)))
             self.per_sc_amp_hist.append(amp)
+        # Outside the state lock (CSICapture has its own lock) so a slow
+        # disk write never blocks the sparkline/motion-score bookkeeping.
+        if self.capture is not None:
+            self.capture.write_frame(frame)
 
     @property
     def live_rate(self) -> float:
@@ -129,7 +240,10 @@ def run_curses(stdscr, args):
     curses.curs_set(0)
     stdscr.nodelay(True)
 
-    state = LiveState(window=args.window)
+    nfft = args.nfft or BW_TO_NFFT[args.bw]
+    capture = CSICapture(out_dir=args.output_dir, nfft=nfft, mode=args.capture_mode)
+
+    state = LiveState(window=args.window, capture=capture)
     baseline_motion = None
     baseline_needed = args.baseline_window or args.window
 
@@ -154,6 +268,8 @@ def run_curses(stdscr, args):
                 ch = stdscr.getch()
                 if ch in (ord("q"), ord("Q")):
                     break
+                if ch in (ord("c"), ord("C")):
+                    capture.toggle()
 
                 if state.n_errors == -1:
                     stdscr.erase()
@@ -174,10 +290,18 @@ def run_curses(stdscr, args):
 
                 elapsed = time.time() - state.start_time
                 put(0, f"csi_analysis live monitor -- iface={args.iface} chip={args.chip} "
-                       f"bw={args.bw}MHz port={args.udp_port}  [q to quit]")
+                       f"bw={args.bw}MHz port={args.udp_port}  [q to quit, c to start/stop capture]")
                 put(1, "-" * min(w - 1, 78))
                 put(2, f"elapsed: {elapsed:6.1f}s   seen: {state.n_seen:6d}   decoded: {state.n_decoded:6d}   "
                        f"errors: {max(state.n_errors,0):4d}   live rate: {state.live_rate:5.1f} pkt/s")
+
+                if capture.active:
+                    stdscr.attron(curses.A_BOLD)
+                    put(3, f"** CAPTURING ** -> {capture.path.name}   frames written: {capture.n_written}")
+                    stdscr.attroff(curses.A_BOLD)
+                else:
+                    prev = f" (last: {capture.path.name}, {capture.n_written} frames)" if capture.path else ""
+                    put(3, f"capture: OFF -- press 'c' to start recording to {capture.out_dir}/{prev}")
 
                 frame = state.last_frame
                 if frame is not None:
@@ -234,6 +358,7 @@ def run_curses(stdscr, args):
                 break
     finally:
         stop_flag.set()
+        capture.close()
 
 
 def main(argv=None):
@@ -263,12 +388,26 @@ def main(argv=None):
     p.add_argument("--motion-threshold", type=float, default=1.5,
                     help="Ratio of current motion score over baseline that triggers the alert")
     p.add_argument("--refresh-hz", type=float, default=10.0, help="Dashboard redraw rate")
+
+    p.add_argument("--output-dir", type=str, default=None,
+                    help="Directory for keypress-triggered CSI captures (press 'c' in the "
+                         "dashboard to start/stop). Default: an 'output/' folder next to this "
+                         "script -- the same folder heartbeat-giop.py writes ground_truth.csv "
+                         "to, so both land together for the ML step.")
+    p.add_argument("--capture-mode", choices=["complex", "amplitude", "phase"], default="amplitude",
+                    help="Representation to write per subcarrier when capturing (see utils.save_csv "
+                         "for the same convention used by main.py's --save-csv)")
     args = p.parse_args(argv)
 
     if not args.src_ip:
         args.src_ip = None
     if (args.select_core is None) != (args.select_stream is None):
         p.error("--select-core and --select-stream must be given together")
+
+    args.output_dir = (
+        Path(args.output_dir) if args.output_dir
+        else Path(__file__).resolve().parent / "output"
+    )
 
     curses.wrapper(run_curses, args)
 

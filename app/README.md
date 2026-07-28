@@ -19,6 +19,7 @@ the environment.
 1. [Flags reference](#useful-flags-reference)
 1. [Loss/stream diagnostics](#reading-the-lossstream-diagnostics)
 1. [Live monitoring](#live-monitoring)
+1. [Recording live CSI (for ML)](#recording-live-csi-for-ml)
 1. [Ground Truth](#ground-truth-data)
 
 ## Layout
@@ -254,6 +255,47 @@ Useful flags:
 This reuses the exact same `decoder.decode_frame_payload()` as `main.py`,
 so any chip/header-format/bandwidth settings that work for your pcap
 captures will work here too.
+
+### Recording live CSI (for ML)
+
+Press `c` in the dashboard to start recording every decoded CSI packet to a
+timestamped CSV; press `c` again to stop. This lets you capture data
+live -- no separate tcpdump-then-decode step -- and, by default, writes to
+the same `output/` folder that `heartbeat-giop.py` writes
+`ground_truth.csv` to, so both data streams land side by side, ready to be
+paired up for the ML step:
+
+```bash
+sudo python live_monitor.py --iface wlan0 --chip 43455c0 --bw 80
+# press 'c' to start recording, 'c' again to stop, 'q' to quit
+```
+
+While active, the dashboard shows a bolded status line with the current
+filename and frame count (`** CAPTURING ** -> csi_capture_20260728_101500.csv
+  frames written: 842`); while idle it shows where the next capture will go.
+
+File format, one row per packet:
+
+```
+ts, seq_num, core, spatial_stream, sc0_amp, sc1_amp, ..., sc{nfft-1}_amp
+```
+
+- **`ts`** is a raw `time.time()` epoch timestamp formatted to 3 decimals --
+  the exact same convention `heartbeat-giop.py` uses for `ground_truth.csv`
+  -- so the two streams can be aligned/interpolated by timestamp afterward.
+- Subcarriers are written in **raw decode order (not fftshifted)**, matching
+  `utils.save_csv()` / `main.py --save-csv`, so a live capture lines up
+  column-for-column with an offline pcap export.
+- Files are named `csi_capture_<YYYYMMDD_HHMMSS>.csv`; each `c`-start opens
+  a new file rather than appending, so separate recording sessions in the
+  same run don't get mixed together.
+
+Useful flags:
+- `--output-dir` -- where captures are written (default: `output/` next to
+  `live_monitor.py`, matching `heartbeat-giop.py`).
+- `--capture-mode {amplitude,phase,complex}` -- representation to record per
+  subcarrier (default `amplitude`; `complex` keeps full I/Q if you need
+  phase for a later step).
 
 ## Ground truth data
 
