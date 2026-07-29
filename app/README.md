@@ -21,6 +21,7 @@ the environment.
 1. [Live monitoring](#live-monitoring)
 1. [Recording live CSI (for ML)](#recording-live-csi-for-ml)
 1. [Ground Truth](#ground-truth-data)
+1. [Baseline heart-rate check](#baseline-heart-rate-check)
 
 ## Layout
 
@@ -32,6 +33,7 @@ csi_analysis/
 ├── plotting.py        # Time plots, heatmaps, FFT plots (headless-safe)
 ├── filters.py          # Hampel filter, Butterworth low-pass/band-pass
 ├── utils.py             # Save/load to .npz / .csv, logging setup
+├── align_and_baseline.py # Align CSI + ground-truth heart-rate CSVs, FFT-estimate BPM per window
 ├── requirements.txt
 └── example_pcap/        # put test captures here
 ```
@@ -304,3 +306,88 @@ python3 heartbeat-giop.py
 ```
 
 Use this to record timed heart-rate data to output directory. 
+
+## Baseline heart-rate check
+
+Once you have both a CSI capture (`output/csi_capture_*.csv` from
+`live_monitor.py`) and a ground-truth recording (`output/ground_truth.csv`
+from `heartbeat-giop.py`) covering the same session, `align_and_baseline.py`
+answers the key question before you build anything fancier: **does the CSI
+signal actually contain a usable heart-rate signature?**
+
+```bash
+python align_and_baseline.py \
+    --csi-csv output/csi_capture_20260728_101500.csv \
+    --gt-csv output/ground_truth.csv \
+    --out-dir results/baseline_ml
+```
+
+What it does:
+
+1. Loads both CSVs and aligns them on their shared `time.time()` timestamp
+   column (checks they actually overlap in time first).
+2. Resamples the (possibly slightly irregular) CSI amplitude onto a uniform
+   time grid at its estimated sample rate.
+3. Band-pass filters that signal to the human heart-rate band (default
+   0.5-3.7 Hz == 30-220 BPM, matching `heartbeat-giop.py`'s
+   `MIN_BPM`/`MAX_BPM`) using `filters.butterworth_bandpass`, to knock out
+   breathing and slow motion artifacts.
+4. Slides a window (default 8s, 50% overlap) over the filtered signal, FFTs
+   each one (Hanning-windowed, same idea as `analysis.fft_motion_detection`),
+   and takes the dominant in-band frequency as the CSI-estimated BPM.
+5. Matches each window against the ground-truth beats that fall inside it
+   (or the nearest beat, if none fall inside) and reports **MAE, RMSE, bias,
+   and correlation** against the true BPM.
+
+This is intentionally *not* the ML model itself -- it's the sanity check
+that tells you whether the raw signal-processing approach is anywhere
+close, which is much easier to debug than a model that silently learns
+nothing useful.
+
+Outputs, written to `--out-dir` (default `results/baseline_ml`):
+
+- **`baseline_bpm_comparison.png`** -- estimated vs. ground-truth BPM over
+  time, plus a parity (scatter) plot against the `y = x` line.
+- **`baseline_results.csv`** -- one row per window
+  (`t_start, t_end, t_center, est_bpm, est_magnitude, true_bpm, n_gt_beats`).
+  These are directly reusable as `(feature, label)` pairs for a later ML
+  step, so you don't need to redo the alignment/windowing work.
+
+Rule of thumb printed alongside the metrics: MAE/RMSE well under ~5-10 BPM
+with correlation trending toward 1.0 means the raw FFT approach is already
+picking up a real cardiac signal, and it's worth moving on to an ML model
+for refinement. Errors comparable to the BPM range itself, or near-zero
+correlation, mean the signal isn't there yet at this chip/bw/placement/
+window setting -- worth checking those before any model will help.
+
+Useful flags:
+- `--subcarrier N` -- use a single subcarrier's amplitude (index into the
+  CSV's own columns) instead of the mean across all of them; useful once
+  you've found a subcarrier with better SNR for this signal.
+- `--window-s` / `--overlap` -- FFT window length and overlap (default 8s,
+  50%).
+- `--low-hz` / `--high-hz` -- band-pass edges in Hz (default 0.5/3.7, i.e.
+  30-222 BPM).
+
+  ## Baseline heart-rate check all subcarriers
+
+Once you have both a CSI capture (`output/csi_capture_*.csv` from
+`live_monitor.py`) and a ground-truth recording (`output/ground_truth.csv`
+from `heartbeat-giop.py`) covering the same session, `align_and_baseline.py`
+answers the key question before you build anything fancier: **does the CSI
+signal actually contain a usable heart-rate signature?**
+
+```bash
+python align_and_baseline.py \
+    --csi-csv output/csi_capture_20260728_101500.csv \
+    --gt-csv output/ground_truth.csv \
+    --out-dir results/baseline_ml
+```
+
+````bash
+python align_and_baseline.py \
+  --csi-csv output/csi_capture.csv \
+  --gt-csv output/ground_truth.csv \
+  --search-subcarriers \
+  --out-dir results/baseline_ml
+```
