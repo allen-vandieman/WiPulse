@@ -384,7 +384,10 @@ python align_and_baseline.py \
     --out-dir results/baseline_ml
 ```
 
-````bash
+- All
+
+
+```bash
 python align_and_baseline.py \
   --csi-csv output/csi_capture.csv \
   --gt-csv output/ground_truth.csv \
