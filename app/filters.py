@@ -102,3 +102,56 @@ def butterworth_bandpass(x: np.ndarray, low_hz: float, high_hz: float, fs_hz: fl
     b, a = butter(order, [low_hz / nyq, high_hz / nyq], btype="band")
     out = filtfilt(b, a, x, axis=0)
     return out[:, 0] if was_1d else out
+
+
+def remove_dc_drift(x: np.ndarray, window_size: int = 21) -> np.ndarray:
+    """Subtract a rolling mean to remove slow drift from each subcarrier."""
+    x = np.asarray(x, dtype=np.float64)
+    was_1d = x.ndim == 1
+    if was_1d:
+        x = x[:, None]
+
+    if x.shape[0] < 2:
+        return x[:, 0] if was_1d else x
+
+    if window_size < 2:
+        window_size = 2
+
+    pad = window_size // 2
+    kernel = np.ones(window_size, dtype=np.float64) / window_size
+    moving_avg = np.apply_along_axis(lambda y: np.convolve(y, kernel, mode="same"), 0, x)
+    detrended = x - moving_avg
+    return detrended[:, 0] if was_1d else detrended
+
+
+def normalize_signal(x: np.ndarray) -> np.ndarray:
+    """Standardize each subcarrier to zero-mean, unit-variance."""
+    x = np.asarray(x, dtype=np.float64)
+    was_1d = x.ndim == 1
+    if was_1d:
+        x = x[:, None]
+
+    std = np.std(x, axis=0, keepdims=True)
+    std[std == 0] = 1.0
+    out = (x - np.mean(x, axis=0, keepdims=True)) / std
+    return out[:, 0] if was_1d else out
+
+
+def preprocess_subcarrier_signal(
+    x: np.ndarray,
+    fs_hz: float,
+    hampel_window: int = 51,
+    hampel_sigmas: float = 3.0,
+    low_hz: float = 0.7,
+    high_hz: float = 2.5,
+    order: int = 4,
+) -> np.ndarray:
+    """Apply the full heartbeat-oriented filtering chain: Hampel → bandpass → drift removal → normalization."""
+    if x.ndim != 1:
+        raise ValueError("preprocess_subcarrier_signal expects a 1D signal")
+
+    filtered = hampel_filter(x, window_size=hampel_window, n_sigmas=hampel_sigmas)
+    filtered = butterworth_bandpass(filtered, low_hz=low_hz, high_hz=high_hz, fs_hz=fs_hz, order=order)
+    filtered = remove_dc_drift(filtered)
+    filtered = normalize_signal(filtered)
+    return filtered

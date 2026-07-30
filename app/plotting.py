@@ -122,3 +122,28 @@ def plot_variance_bar(per_sc_std: np.ndarray, out_path: str, sc_axis=None,
     ax.set_title(title)
     ax.grid(True, alpha=0.3)
     _finish(fig, out_path, show)
+
+
+def plot_pipeline_stages(raw_signal: np.ndarray, hampel_signal: np.ndarray,
+                          bandpass_signal: np.ndarray, detrended_signal: np.ndarray,
+                          normalized_signal: np.ndarray, out_path: str,
+                          x_axis=None, title="Pipeline stages for one subcarrier", show=False):
+    fig, axes = plt.subplots(5, 1, figsize=(12, 10), sharex=True)
+    x = x_axis if x_axis is not None else np.arange(len(raw_signal))
+
+    signals = [
+        (raw_signal, "raw"),
+        (hampel_signal, "Hampel"),
+        (bandpass_signal, "Butterworth bandpass"),
+        (detrended_signal, "DC drift removed"),
+        (normalized_signal, "normalized"),
+    ]
+
+    for ax, (signal, label) in zip(axes, signals):
+        ax.plot(x, signal, linewidth=1.0)
+        ax.set_ylabel(label)
+        ax.grid(True, alpha=0.3)
+
+    axes[-1].set_xlabel("Time (s)" if x_axis is not None else "Packet #")
+    axes[0].set_title(title)
+    _finish(fig, out_path, show)

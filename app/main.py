@@ -42,8 +42,9 @@ from analysis import (
     amplitude, phase, select_subcarriers, variance_analysis, fft_motion_detection,
     stream_breakdown, select_stream,
 )
-from filters import hampel_filter, butterworth_lowpass
-from plotting import plot_amplitude_time, plot_phase_time, plot_heatmap, plot_fft, plot_variance_bar
+from filters import hampel_filter, butterworth_lowpass, butterworth_bandpass, remove_dc_drift, normalize_signal
+from quality import evaluate_subcarriers
+from plotting import plot_amplitude_time, plot_phase_time, plot_heatmap, plot_fft, plot_variance_bar, plot_pipeline_stages
 from utils import setup_logging, ensure_dir, save_npy, save_csv
 
 logger = logging.getLogger("csi_analysis.main")
@@ -90,8 +91,10 @@ def parse_args(argv=None):
 
     # filtering
     p.add_argument("--hampel", action="store_true", help="Apply a Hampel filter to amplitude before analysis/plots")
-    p.add_argument("--hampel-window", type=int, default=7)
+    p.add_argument("--hampel-window", type=int, default=51)
     p.add_argument("--hampel-sigmas", type=float, default=3.0)
+    p.add_argument("--bandpass-low", type=float, default=0.7, help="Lower cutoff for the heartbeat-oriented Butterworth bandpass")
+    p.add_argument("--bandpass-high", type=float, default=2.5, help="Upper cutoff for the heartbeat-oriented Butterworth bandpass")
     p.add_argument("--lowpass-hz", type=float, default=None,
                    help="Apply a Butterworth low-pass filter at this cutoff (Hz) before FFT/plots")
 
@@ -102,6 +105,9 @@ def parse_args(argv=None):
     p.add_argument("--fft", action="store_true", help="Run FFT-based motion detection and save the spectrum plot")
     p.add_argument("--fft-max-freq", type=float, default=None, help="Clip the FFT plot x-axis to this frequency (Hz)")
     p.add_argument("--variance-plot", action="store_true", help="Save a per-subcarrier variance bar chart")
+    p.add_argument("--quality-threshold", type=float, default=None, help="Only keep subcarriers with a quality score above this value")
+    p.add_argument("--quality-top-k", type=int, default=10, help="Keep the top-K subcarriers after scoring")
+    p.add_argument("--plot-pipeline", action="store_true", help="Plot the raw → Hampel → bandpass → detrended → normalized stages for the selected subcarrier")
     p.add_argument("--save-npy", action="store_true", help="Save the decoded dataset as .npz")
     p.add_argument("--save-csv", choices=["complex", "amplitude", "phase"], default=None,
                    help="Save the decoded dataset as CSV in the given representation")
@@ -197,13 +203,44 @@ def main(argv=None):
                     args.hampel_window, args.hampel_sigmas)
         amp = hampel_filter(amp, window_size=args.hampel_window, n_sigmas=args.hampel_sigmas)
 
-    if args.lowpass_hz is not None:
-        fs = dataset.fs_est
-        if fs <= 0:
-            logger.warning("Cannot low-pass filter: no valid estimated sample rate from timestamps")
-        else:
+    fs = dataset.fs_est
+    if fs > 0:
+        logger.info("Applying Butterworth bandpass %.3f-%.3f Hz (fs=%.2f Hz)...",
+                    args.bandpass_low, args.bandpass_high, fs)
+        amp = butterworth_bandpass(amp, low_hz=args.bandpass_low, high_hz=args.bandpass_high, fs_hz=fs)
+
+        if args.lowpass_hz is not None:
             logger.info("Applying Butterworth low-pass at %.3f Hz (fs=%.2f Hz)...", args.lowpass_hz, fs)
             amp = butterworth_lowpass(amp, cutoff_hz=args.lowpass_hz, fs_hz=fs)
+
+        amp = remove_dc_drift(amp)
+        amp = normalize_signal(amp)
+
+        if args.plot_pipeline and subcarrier_idx is not None and len(subcarrier_idx) > 0:
+            sc_idx = subcarrier_idx[0]
+            raw_signal = amp[:, sc_idx] if amp.ndim == 2 else amp
+            filtered_signal = hampel_filter(raw_signal, window_size=args.hampel_window, n_sigmas=args.hampel_sigmas)
+            bandpassed = butterworth_bandpass(filtered_signal, low_hz=args.bandpass_low, high_hz=args.bandpass_high, fs_hz=fs)
+            detrended = remove_dc_drift(bandpassed)
+            normalized = normalize_signal(detrended)
+            plot_pipeline_stages(
+                raw_signal=raw_signal,
+                hampel_signal=filtered_signal,
+                bandpass_signal=bandpassed,
+                detrended_signal=detrended,
+                normalized_signal=normalized,
+                out_path=os.path.join(args.out_dir, "pipeline_stages.png"),
+                x_axis=dataset.ts - dataset.ts[0],
+            )
+
+        quality = evaluate_subcarriers(amp, fs_hz=fs, top_k=args.quality_top_k)
+        selected = quality["selected_indices"]
+        if args.quality_threshold is not None:
+            selected = [idx for idx in selected if quality["scores"][idx] >= args.quality_threshold]
+        logger.info("Selected subcarriers by quality score: %s", selected)
+        print("\n=== Subcarrier quality ===")
+        for idx in quality["ranked_indices"][: min(args.quality_top_k, len(quality["ranked_indices"]))]:
+            print(f"sc {idx}: score={quality['scores'][idx]:.4f}")
 
     # --- variance / motion score ---
     var_stats = variance_analysis(amp)

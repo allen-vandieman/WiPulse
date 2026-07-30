@@ -15,6 +15,7 @@ the environment.
 1. [Look at it](#step-2--look-at-it)
 1. [Movement test](#step-3--the-movement-test)
 1. [Cleaning noisy data](#cleaning-noisy-data)
+1. [Ground-truth-first quality testing](#ground-truth-first-quality-testing)
 1. [Exporting for ML](#exporting-for-ml)
 1. [Flags reference](#useful-flags-reference)
 1. [Loss/stream diagnostics](#reading-the-lossstream-diagnostics)
@@ -33,8 +34,9 @@ csi_analysis/
 ├── decoder.py        # PCAP parsing + Nexmon header/CSI decoding (int16 & float formats)
 ├── analysis.py        # Amplitude/phase, subcarrier selection, variance, FFT motion detection
 ├── plotting.py        # Time plots, heatmaps, FFT plots (headless-safe)
-├── filters.py          # Hampel filter, Butterworth low-pass/band-pass
-├── utils.py             # Save/load to .npz / .csv, logging setup
+├── filters.py         # Hampel filter, Butterworth band-pass/low-pass, drift removal, normalization
+├── quality.py         # Subcarrier quality scoring (variance, spectral strength, stability, optional GT correlation)
+├── utils.py           # Save/load to .npz / .csv, logging setup
 ├── align_and_baseline.py # Align CSI + ground-truth heart-rate CSVs, FFT-estimate BPM per window
 ├── requirements.txt
 └── example_pcap/        # put test captures here
@@ -161,13 +163,56 @@ you're actually capturing on the right interface/channel.
 
 ```bash
 python main.py --pcap movement.pcap --chip 43455c0 --bw 80 \
-    --out-dir results/movement --hampel --lowpass-hz 10 --fft --heatmap
+    --out-dir results/movement --hampel --bandpass-low 0.7 --bandpass-high 2.5 \
+    --plot-pipeline --quality-top-k 10 --fft --heatmap
 ```
 
-- `--hampel` knocks out isolated spike artifacts per-subcarrier before
-  anything else runs.
-- `--lowpass-hz` applies a zero-phase Butterworth low-pass (needs a valid
-  estimated packet rate from your capture timestamps, printed in Step 1).
+This is the new recommended heartbeat-focused preprocessing pipeline:
+
+- `--hampel` removes isolated spike artifacts per-subcarrier before other
+  filtering.
+- `--bandpass-low` / `--bandpass-high` apply a zero-phase Butterworth
+  band-pass tuned for heartbeat-like motion (default `0.7-2.5 Hz`, which is
+  a good first pass for the 45-120 BPM range).
+- The pipeline then removes slow DC drift and normalizes each subcarrier so
+  high-power carriers do not dominate downstream analysis.
+- `--plot-pipeline` saves a stage-by-stage plot (`raw → Hampel → bandpass →
+  detrended → normalized`) for one selected subcarrier, which is extremely
+  useful for debugging when the signal looks weak or unstable.
+- `--quality-top-k` and `--quality-threshold` rank carriers with the new
+  subcarrier-quality scorer and keep only the most informative ones.
+
+## Ground-truth-first quality testing
+
+Before relying on the new subcarrier-quality ranking on its own, the safest
+first test is to validate it against a ground-truth heartbeat reference.
+That is the best way to answer: "are these selected carriers actually
+carrying the heartbeat signal, or do they just look smooth/noisy?"
+
+Recommended workflow:
+
+1. Record CSI and ground truth at the same time (for example, use
+   `live_monitor.py` for CSI and `heartbeat-giop.py` for the reference).
+2. Run the new preprocessing pipeline with the heart-rate band-pass and
+   subcarrier scoring enabled.
+3. Compare the selected subcarriers against the ground-truth signal using the
+   quality scorer in `quality.py` (it accepts an optional ground-truth array
+   for correlation-based scoring) and the baseline heartbeat check in
+   `align_and_baseline.py`.
+4. Only after the ranking is stable and correlated with the ground truth
+   should you trust the selected carriers for ML feature extraction.
+
+A good first command is:
+
+```bash
+python main.py --pcap movement.pcap --chip 43455c0 --bw 80 \
+    --out-dir results/movement --hampel --bandpass-low 0.7 --bandpass-high 2.5 \
+    --plot-pipeline --quality-top-k 10 --fft --heatmap
+```
+
+If the selected carriers do not line up with the heartbeat reference, reduce
+confidence in the ranking and return to the plot/debugging flow before moving
+on to ML.
 
 ## Exporting for ML
 
