@@ -19,6 +19,29 @@ sudo airodump-ng --band a wlan0mon
 sudo airodump-ng -c 36,40,44,48 wlan0mon
 ```
 
+## Restore
+
+```bash
+# Restore lite
+sudo airmon-ng stop wlan0mon
+sudo systemctl restart wpa_supplicant
+sudo systemctl restart NetworkManager
+sudo ifconfig wlan0 up
+
+
+# Restore medium
+sudo rfkill unblock all
+sudo nmcli radio wifi on
+sudo nmcli device wifi rescan
+sleep 3
+nmcli device wifi list
+sudo systemctl restart wpa_supplicant
+sudo systemctl restart NetworkManager
+
+# Restore Heavy
+sudo reboot now
+```
+
 ## Transmiter
 
 Setup transmitter and tester Pi
