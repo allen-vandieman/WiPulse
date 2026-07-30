@@ -2,8 +2,8 @@
 """
 align_and_baseline.py
 ======================
-Baseline check: does the CSI amplitude signal actually contain a usable
-heart-rate signature, before spending any effort on an ML model?
+Baseline check: does the CSI signal actually contain a usable heart-rate
+signature, before spending any effort on an ML model?
 
 Takes the two CSVs produced by this project --
 
@@ -13,18 +13,33 @@ Takes the two CSVs produced by this project --
 -- and:
 
   1. loads + aligns them on their shared time.time() timestamp column
-  2. resamples the (possibly irregularly-timed) CSI amplitude onto a
+  2. resamples the (possibly irregularly-timed) CSI signal onto a
      uniform time grid at its estimated sample rate
   3. band-pass filters that signal to the human heart-rate band
      (default 0.5-3.7 Hz == 30-220 BPM, matching heartbeat-giop.py's
      MIN_BPM/MAX_BPM) to knock out breathing and slow motion artifacts
   4. slides a window (default 8s, 50% overlap) over the filtered signal,
      FFTs each window (Hanning-windowed, like analysis.fft_motion_detection),
-     and takes the dominant in-band frequency as the CSI-estimated BPM
+     and takes the dominant in-band frequency -- refined with parabolic
+     (3-point) interpolation around the peak bin, so the BPM estimate
+     isn't quantized to the raw FFT bin spacing (60/window_s BPM steps,
+     e.g. 7.5 BPM at the default 8s window) -- as the CSI-estimated BPM
   5. matches each window against the ground-truth beats that fall inside
      it (or the nearest beat, if none fall inside) and reports MAE/RMSE,
      plus a plot of estimated vs. true BPM over time and a scatter/parity
      comparison
+
+Two signal types are supported via --signal-type:
+  - "amplitude" (default): mean/selected subcarrier amplitude, as before.
+  - "phase": per-packet phase, sanitized to remove the linear phase ramp
+    across subcarriers caused by SFO/CFO (a per-packet least-squares fit
+    vs. subcarrier index, subtracted out), then treated as the signal.
+    Requires a --capture-mode complex CSV from live_monitor.py (needs
+    sc*_re/sc*_im columns -- raw sc*_pha columns alone aren't usable here
+    since they're neither unwrapped nor sanitized). Heartbeat-scale chest
+    displacement is sub-millimeter, which shows up far more reliably in
+    phase than in amplitude, so this is worth trying if the amplitude
+    path doesn't correlate with ground truth.
 
 This is intentionally *not* the ML model itself -- it's the sanity check
 that tells you whether the raw signal-processing approach is anywhere
@@ -37,6 +52,13 @@ Usage:
         --csi-csv output/csi_capture_20260728_101500.csv \\
         --gt-csv output/ground_truth.csv \\
         --out-dir results/baseline_ml
+
+    # phase-based path (needs a --capture-mode complex capture)
+    python align_and_baseline.py \\
+        --csi-csv output/csi_capture_20260728_101500.csv \\
+        --gt-csv output/ground_truth.csv \\
+        --signal-type phase \\
+        --out-dir results/baseline_ml_phase
 """
 
 from __future__ import annotations
@@ -160,6 +182,72 @@ def load_csi_amp_matrix(path: str) -> Tuple[np.ndarray, np.ndarray]:
     return ts, amp
 
 
+def load_csi_complex_matrix(path: str) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Load the full complex CSI matrix (time, subcarriers) from a
+    --capture-mode complex CSV (sc*_re / sc*_im columns). Needed for the
+    phase-sanitization path, since amplitude-only or raw-phase-only CSVs
+    don't carry enough information to remove the SFO/CFO phase ramp.
+    """
+    with open(path, newline="") as f:
+        reader = csv.reader(f)
+        header = next(reader)
+        rows = list(reader)
+
+    if not rows:
+        raise ValueError(f"No data rows in {path}")
+
+    ts_idx = _find_header_index(header, ("ts", "timestamp", "time", "time_s", "sample_time", "t"))
+    ts = _load_numeric_column(rows, ts_idx if ts_idx >= 0 else 0)
+
+    re_idx = [i for i, h in enumerate(header) if h.strip().lower().endswith("_re")]
+    im_idx = [i for i, h in enumerate(header) if h.strip().lower().endswith("_im")]
+
+    if not (re_idx and im_idx):
+        raise ValueError(
+            f"Couldn't find sc*_re/sc*_im columns in {path} -- phase-based analysis needs "
+            f"a capture recorded with live_monitor.py's --capture-mode complex (full I/Q). "
+            f"Header: {header[:8]}..."
+        )
+
+    re = np.column_stack([_load_numeric_column(rows, i) for i in re_idx])
+    im = np.column_stack([_load_numeric_column(rows, i) for i in im_idx])
+    csi = re + 1j * im
+    return ts, csi
+
+
+def sanitize_phase(csi: np.ndarray) -> np.ndarray:
+    """
+    Per-packet phase sanitization: unwrap phase across the subcarrier axis,
+    then remove the linear trend (least-squares fit vs. subcarrier index)
+    that SFO/CFO impose on every packet. What's left is (approximately) the
+    true channel phase, which is where sub-millimeter chest-wall motion
+    from a heartbeat actually shows up -- amplitude is dominated by larger
+    motion (breathing, body sway) and mostly buries it.
+
+    csi: (n_packets, nfft) complex matrix.
+    Returns: (n_packets, nfft) sanitized phase, radians.
+    """
+    csi = np.asarray(csi)
+    n_packets, nfft = csi.shape
+    unwrapped = np.unwrap(np.angle(csi), axis=1)
+
+    x = np.arange(nfft, dtype=np.float64)
+    x_mean = x.mean()
+    x_centered = x - x_mean
+    denom = np.sum(x_centered ** 2)
+    if denom == 0:
+        return unwrapped - unwrapped.mean(axis=1, keepdims=True)
+
+    y_mean = unwrapped.mean(axis=1, keepdims=True)
+    y_centered = unwrapped - y_mean
+    slope = (y_centered @ x_centered) / denom          # shape (n_packets,)
+    intercept = y_mean[:, 0] - slope * x_mean
+
+    fitted = slope[:, None] * x[None, :] + intercept[:, None]
+    return unwrapped - fitted
+
+
 def load_ground_truth_csv(path: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Load heartbeat-giop.py's ground_truth.csv: timestamp, ibi_s, instant_bpm, avg_bpm."""
     with open(path, newline="") as f:
@@ -228,10 +316,21 @@ def resample_uniform(ts: np.ndarray, x: np.ndarray, fs: float) -> Tuple[np.ndarr
 
 def windowed_fft_bpm(t_uniform: np.ndarray, x_filtered: np.ndarray, fs: float,
                       window_s: float, overlap: float,
-                      low_hz: float, high_hz: float) -> List[dict]:
+                      low_hz: float, high_hz: float,
+                      interpolate: bool = True) -> List[dict]:
     """
     Slide a Hanning-windowed FFT over x_filtered and, per window, return the
     dominant frequency (converted to BPM) within [low_hz, high_hz].
+
+    interpolate: if True (default), refine the dominant bin with 3-point
+        parabolic interpolation over the log-magnitude spectrum around the
+        peak. A raw FFT bin pick is quantized to fs/window_s Hz steps (e.g.
+        7.5 BPM at the default 100 Hz / 8s window) regardless of how clean
+        the signal is; interpolation gives a sub-bin estimate without
+        needing a longer window (which would cost temporal resolution) or
+        zero-padding (more compute for the same info). Falls back to the
+        raw bin at either edge of the spectrum, where there's no neighbor
+        on one side to interpolate against.
     """
     win_samples = int(round(window_s * fs))
     if win_samples < 8:
@@ -240,6 +339,7 @@ def windowed_fft_bpm(t_uniform: np.ndarray, x_filtered: np.ndarray, fs: float,
             f"(only {win_samples} samples/window); use a longer window."
         )
     step = max(1, int(round(win_samples * (1.0 - overlap))))
+    freq_res = fs / win_samples
 
     results = []
     for start in range(0, len(x_filtered) - win_samples + 1, step):
@@ -255,9 +355,26 @@ def windowed_fft_bpm(t_uniform: np.ndarray, x_filtered: np.ndarray, fs: float,
         if not np.any(band_mask):
             continue
 
-        band_freqs = freqs[band_mask]
-        band_mag = mag[band_mask]
-        dom_idx = int(np.argmax(band_mag))
+        band_indices = np.where(band_mask)[0]
+        band_mag = mag[band_indices]
+        dom_local = int(np.argmax(band_mag))
+        dom_idx = int(band_indices[dom_local])
+
+        est_freq = freqs[dom_idx]
+        est_mag = mag[dom_idx]
+
+        if interpolate and 0 < dom_idx < len(mag) - 1:
+            alpha, beta, gamma = mag[dom_idx - 1], mag[dom_idx], mag[dom_idx + 1]
+            denom = alpha - 2.0 * beta + gamma
+            if denom != 0:
+                p = 0.5 * (alpha - gamma) / denom
+                p = float(np.clip(p, -1.0, 1.0))  # guard against a pathological ratio
+                est_freq = freqs[dom_idx] + p * freq_res
+                # parabolic estimate of the interpolated peak magnitude
+                est_mag = beta - 0.25 * (alpha - gamma) * p
+            # clamp back into the requested band -- interpolation can, at a
+            # band edge, nudge the estimate slightly outside [low_hz, high_hz]
+            est_freq = float(np.clip(est_freq, low_hz, high_hz))
 
         t_start = t_uniform[start]
         t_end = t_uniform[start + win_samples - 1]
@@ -265,8 +382,8 @@ def windowed_fft_bpm(t_uniform: np.ndarray, x_filtered: np.ndarray, fs: float,
             "t_start": t_start,
             "t_end": t_end,
             "t_center": (t_start + t_end) / 2.0,
-            "est_bpm": float(band_freqs[dom_idx] * 60.0),
-            "est_magnitude": float(band_mag[dom_idx]),
+            "est_bpm": float(est_freq * 60.0),
+            "est_magnitude": float(est_mag),
         })
 
     return results
@@ -456,6 +573,7 @@ def evaluate_signal(csi_ts: np.ndarray, signal: np.ndarray, gt_ts: np.ndarray,
         overlap=args.overlap,
         low_hz=low_hz,
         high_hz=high_hz,
+        interpolate=not args.no_fft_interp,
     )
     if not windows:
         raise ValueError("No windows produced -- capture may be too short for the current window length")
@@ -512,13 +630,23 @@ def parse_args(argv=None):
                    help="Path to heartbeat-giop.py's ground_truth.csv")
     p.add_argument("--out-dir", default="results/baseline_ml", help="Directory for outputs")
     p.add_argument("--subcarrier", type=int, default=None,
-                   help="Use a single subcarrier's amplitude (index into the CSV's own "
+                   help="Use a single subcarrier's signal (index into the CSV's own "
                         "columns) instead of the mean across all subcarriers")
     p.add_argument("--search-subcarriers", action="store_true",
                    help="Evaluate every subcarrier and the average of the top-ranked subcarrier groups")
 
+    p.add_argument("--signal-type", choices=["amplitude", "phase"], default="amplitude",
+                   help="'amplitude' (default) uses sc*_amp or sc*_re/sc*_im magnitude. "
+                        "'phase' uses sanitized phase (linear SFO/CFO ramp removed per packet) "
+                        "and requires a --capture-mode complex CSV from live_monitor.py.")
+
     p.add_argument("--window-s", type=float, default=8.0, help="FFT window length (seconds)")
     p.add_argument("--overlap", type=float, default=0.5, help="Fractional overlap between windows (0-1)")
+    p.add_argument("--no-fft-interp", action="store_true",
+                   help="Disable parabolic (3-point) interpolation of the FFT peak bin and use "
+                        "the raw bin frequency instead. Interpolation is on by default since the "
+                        "raw bin pick quantizes BPM estimates to fs/window_s Hz steps "
+                        "(7.5 BPM at the default 100 Hz / 8s window).")
 
     p.add_argument("--low-hz", type=float, default=0.5,
                    help="Low edge of the heart-rate band-pass (Hz); default matches 30 BPM")
@@ -545,7 +673,13 @@ def main(argv=None):
         return 1
 
     logger.info("Loading CSI CSV: %s", args.csi_csv)
-    csi_ts, amp_matrix = load_csi_amp_matrix(args.csi_csv)
+    if args.signal_type == "phase":
+        csi_ts, csi_complex = load_csi_complex_matrix(args.csi_csv)
+        logger.info("Sanitizing phase (removing per-packet linear SFO/CFO ramp across "
+                     "%d subcarriers)...", csi_complex.shape[1])
+        signal_matrix = sanitize_phase(csi_complex)
+    else:
+        csi_ts, signal_matrix = load_csi_amp_matrix(args.csi_csv)
 
     logger.info("Loading ground-truth CSV: %s", args.gt_csv)
     gt_ts, gt_instant_bpm, gt_avg_bpm = load_ground_truth_csv(args.gt_csv)
@@ -571,6 +705,8 @@ def main(argv=None):
             args.high_hz, nyq, nyq * 0.95,
         )
         args.high_hz = nyq * 0.95
+    logger.info("Signal type: %s   FFT peak interpolation: %s",
+                args.signal_type, "off" if args.no_fft_interp else "on")
     logger.info("Band-pass filtering to %.2f-%.2f Hz (%.0f-%.0f BPM)...",
                 args.low_hz, args.high_hz, args.low_hz * 60, args.high_hz * 60)
 
@@ -578,8 +714,8 @@ def main(argv=None):
 
     if args.search_subcarriers:
         subcarrier_rows = []
-        for subcarrier_idx in range(amp_matrix.shape[1]):
-            signal = amp_matrix[:, subcarrier_idx]
+        for subcarrier_idx in range(signal_matrix.shape[1]):
+            signal = signal_matrix[:, subcarrier_idx]
             windows, metrics = evaluate_signal(
                 csi_ts,
                 signal,
@@ -619,7 +755,7 @@ def main(argv=None):
             if n > len(ranked_rows):
                 continue
             selected = [row["subcarrier"] for row in ranked_rows[:n]]
-            signal = np.mean(amp_matrix[:, selected], axis=1)
+            signal = np.mean(signal_matrix[:, selected], axis=1)
             windows, metrics = evaluate_signal(
                 csi_ts,
                 signal,
@@ -648,7 +784,7 @@ def main(argv=None):
 
         primary_windows, primary_metrics = evaluate_signal(
             csi_ts,
-            amp_matrix[:, ranked_rows[0]["subcarrier"]],
+            signal_matrix[:, ranked_rows[0]["subcarrier"]],
             gt_ts,
             gt_instant_bpm,
             gt_avg_bpm,
@@ -659,7 +795,7 @@ def main(argv=None):
         )
         save_results_csv(primary_windows, os.path.join(args.out_dir, "baseline_results.csv"))
         plot_comparison(primary_windows, os.path.join(args.out_dir, "baseline_bpm_comparison.png"))
-        print_error_metrics(primary_windows, label="Best single subcarrier")
+        print_error_metrics(primary_windows, label=f"Best single subcarrier ({args.signal_type})")
 
         best_avg = max(topn_results, key=lambda row: row["score"] if np.isfinite(row["score"]) else -np.inf)
         recommendation = {
@@ -695,9 +831,9 @@ def main(argv=None):
         return 0
 
     if args.subcarrier is not None:
-        signal = amp_matrix[:, args.subcarrier]
+        signal = signal_matrix[:, args.subcarrier]
     else:
-        signal = np.mean(amp_matrix, axis=1)
+        signal = np.mean(signal_matrix, axis=1)
 
     windows, metrics = evaluate_signal(
         csi_ts,
@@ -710,7 +846,7 @@ def main(argv=None):
         args.low_hz,
         args.high_hz,
     )
-    print_error_metrics(windows)
+    print_error_metrics(windows, label=f"Baseline results ({args.signal_type})")
 
     save_results_csv(windows, os.path.join(args.out_dir, "baseline_results.csv"))
     plot_comparison(windows, os.path.join(args.out_dir, "baseline_bpm_comparison.png"))
