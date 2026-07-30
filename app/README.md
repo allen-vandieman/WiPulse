@@ -21,6 +21,9 @@ the environment.
 1. [Live monitoring](#live-monitoring)
 1. [Recording live CSI (for ML)](#recording-live-csi-for-ml)
 1. [Ground Truth](#ground-truth-data)
+1. [Baseline heart-rate check](#baseline-heart-rate-check)
+1. [Amplitude vs. phase](#amplitude-vs-phase---signal-type)
+1. [Searching all subcarriers](#searching-all-subcarriers)
 
 ## Layout
 
@@ -32,6 +35,7 @@ csi_analysis/
 ├── plotting.py        # Time plots, heatmaps, FFT plots (headless-safe)
 ├── filters.py          # Hampel filter, Butterworth low-pass/band-pass
 ├── utils.py             # Save/load to .npz / .csv, logging setup
+├── align_and_baseline.py # Align CSI + ground-truth heart-rate CSVs, FFT-estimate BPM per window
 ├── requirements.txt
 └── example_pcap/        # put test captures here
 ```
@@ -304,3 +308,133 @@ python3 heartbeat-giop.py
 ```
 
 Use this to record timed heart-rate data to output directory. 
+
+## Baseline heart-rate check
+
+Once you have both a CSI capture (`output/csi_capture_*.csv` from
+`live_monitor.py`) and a ground-truth recording (`output/ground_truth.csv`
+from `heartbeat-giop.py`) covering the same session, `align_and_baseline.py`
+answers the key question before you build anything fancier: **does the CSI
+signal actually contain a usable heart-rate signature?**
+
+```bash
+python align_and_baseline.py \
+    --csi-csv output/csi_capture_20260728_101500.csv \
+    --gt-csv output/ground_truth.csv \
+    --out-dir results/baseline_ml
+```
+
+What it does:
+
+1. Loads both CSVs and aligns them on their shared `time.time()` timestamp
+   column (checks they actually overlap in time first).
+2. Resamples the (possibly slightly irregular) CSI signal onto a uniform
+   time grid at its estimated sample rate.
+3. Band-pass filters that signal to the human heart-rate band (default
+   0.5-3.7 Hz == 30-220 BPM, matching `heartbeat-giop.py`'s
+   `MIN_BPM`/`MAX_BPM`) using `filters.butterworth_bandpass`, to knock out
+   breathing and slow motion artifacts.
+4. Slides a window (default 8s, 50% overlap) over the filtered signal, FFTs
+   each one (Hanning-windowed, same idea as `analysis.fft_motion_detection`),
+   and takes the dominant in-band frequency -- refined with 3-point
+   parabolic interpolation around the peak bin -- as the CSI-estimated BPM.
+5. Matches each window against the ground-truth beats that fall inside it
+   (or the nearest beat, if none fall inside) and reports **MAE, RMSE, bias,
+   and correlation** against the true BPM.
+
+This is intentionally *not* the ML model itself -- it's the sanity check
+that tells you whether the raw signal-processing approach is anywhere
+close, which is much easier to debug than a model that silently learns
+nothing useful.
+
+Outputs, written to `--out-dir` (default `results/baseline_ml`):
+
+- **`baseline_bpm_comparison.png`** -- estimated vs. ground-truth BPM over
+  time, plus a parity (scatter) plot against the `y = x` line.
+- **`baseline_results.csv`** -- one row per window
+  (`t_start, t_end, t_center, est_bpm, est_magnitude, true_bpm, n_gt_beats`).
+  These are directly reusable as `(feature, label)` pairs for a later ML
+  step, so you don't need to redo the alignment/windowing work.
+
+Rule of thumb printed alongside the metrics: MAE/RMSE well under ~5-10 BPM
+with correlation trending toward 1.0 means the raw FFT approach is already
+picking up a real cardiac signal, and it's worth moving on to an ML model
+for refinement. Errors comparable to the BPM range itself, or near-zero
+correlation, mean the signal isn't there yet at this chip/bw/placement/
+window setting -- worth checking those before any model will help.
+
+### Amplitude vs. phase (`--signal-type`)
+
+By default the script uses **amplitude** (`sc*_amp` columns, or the
+magnitude of `sc*_re`/`sc*_im`). Heartbeat-scale chest-wall displacement is
+sub-millimeter, though, which is usually swamped in amplitude by breathing
+and body sway. If your amplitude-based correlation is low (and especially
+if `correlation_vs_subcarrier.png` shows a smooth, near-monotonic trend
+across the whole subcarrier range rather than a noisy scatter -- a sign
+you're picking up systematic drift, not real per-tone channel modulation),
+it's worth trying **phase** instead:
+
+```bash
+# 1. record a fresh capture with full I/Q (phase needs this -- an
+#    amplitude-only or raw sc*_pha capture doesn't carry enough
+#    information to remove the SFO/CFO phase ramp)
+sudo python live_monitor.py --iface wlan0 --chip 43455c0 --bw 80 \
+    --capture-mode complex
+# press 'c' to start/stop recording, 'q' to quit
+
+# 2. run the baseline check on phase instead of amplitude
+python align_and_baseline.py \
+    --csi-csv output/csi_capture_<new_timestamp>.csv \
+    --gt-csv output/ground_truth.csv \
+    --signal-type phase \
+    --search-subcarriers \
+    --out-dir results/baseline_ml_phase
+```
+
+`--signal-type phase` unwraps phase across the subcarrier axis per packet,
+then removes the linear SFO/CFO ramp with a per-packet least-squares fit
+against subcarrier index (`align_and_baseline.sanitize_phase`) -- what's
+left is (approximately) the true channel phase, everything downstream
+(resampling, band-pass, windowed FFT, ground-truth matching, plots) is
+identical to the amplitude path.
+
+Useful flags:
+- `--signal-type {amplitude,phase}` -- amplitude (default) or sanitized
+  phase; see above. `phase` requires a `--capture-mode complex` CSV.
+- `--subcarrier N` -- use a single subcarrier's signal (index into the
+  CSV's own columns) instead of the mean across all of them; useful once
+  you've found a subcarrier with better SNR.
+- `--search-subcarriers` -- evaluate every subcarrier plus the average of
+  the top-ranked groups (top 1/3/5/10/20), and write out a ranked
+  `subcarrier_metrics.csv`, `correlation_vs_subcarrier.png`, and
+  `mae_vs_subcarrier.png` alongside a `summary.txt` recommendation.
+- `--window-s` / `--overlap` -- FFT window length and overlap (default 8s,
+  50%).
+- `--no-fft-interp` -- disable the parabolic peak interpolation and use
+  the raw FFT bin instead. Interpolation is on by default since a raw bin
+  pick quantizes BPM estimates to `60/window_s` Hz steps (7.5 BPM at the
+  default 100 Hz / 8s window) regardless of how clean the signal is.
+- `--low-hz` / `--high-hz` -- band-pass edges in Hz (default 0.5/3.7, i.e.
+  30-222 BPM).
+
+### Searching all subcarriers
+
+`--search-subcarriers` evaluates every subcarrier individually (ranked by
+a `corr / (1 + mae)` score) and also the average of the top 1/3/5/10/20
+performers, which is usually a better-conditioned signal than any single
+subcarrier alone:
+
+```bash
+python align_and_baseline.py \
+  --csi-csv output/csi_capture.csv \
+  --gt-csv output/ground_truth.csv \
+  --search-subcarriers \
+  --out-dir results/baseline_ml
+```
+
+Same flag works with `--signal-type phase` -- run both and compare the two
+`correlation_vs_subcarrier.png` plots. A noisier, less monotonic-looking
+curve with a higher peak correlation for phase is the signature that
+phase is picking up real per-tone heartbeat modulation that amplitude was
+missing, rather than the same systematic drift artifact.
+```

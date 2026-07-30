@@ -1,7 +1,7 @@
 ## Woring Folder and envirment
 
 ```bash
-cd work
+cd ~/work
 
 source env/bin/activate
 
@@ -15,6 +15,13 @@ For a real-time terminal dashboard instead of capture-then-analyze:
 ```bash
 sudo python live_monitor.py --iface wlan0 --chip 43455c0 --bw 80
 ```
+
+Useful flags:
+- `--output-dir` -- where captures are written (default: `output/` next to
+  `live_monitor.py`, matching `heartbeat-giop.py`).
+- `--capture-mode {amplitude,phase,complex}` -- representation to record per
+  subcarrier (default `amplitude`; `complex` keeps full I/Q if you need
+  phase for a later step).
 
 Live view with filter
 
@@ -39,4 +46,13 @@ source test/bin/activate
 
 # Install pre-requirements to enviroment
 pip install -r requirements.txt
+```
+
+## Prep data for ML
+
+```bash
+python align_and_baseline.py \
+    --csi-csv output/csi_capture_20260728_101500.csv \
+    --gt-csv output/ground_truth.csv \
+    --out-dir results/baseline_ml
 ```
