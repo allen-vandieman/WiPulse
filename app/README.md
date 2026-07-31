@@ -1,9 +1,16 @@
-# csi_analysis
+# WiPulse CSI analysis toolkit
 
-Toolkit for decoding and analyzing [Nexmon CSI](https://github.com/seemoo-lab/nexmon_csi)
-captures (`sudo tcpdump -i wlan0 udp port 5500 -w csi_capture.pcap`) and
-validating that the extracted CSI actually reflects movement/obstacles in
-the environment.
+This repository now contains a full contactless vital-sign workflow for
+[Nexmon CSI](https://github.com/seemoo-lab/nexmon_csi) captures. The app-side
+pipeline can decode CSI from pcap files or a live interface, filter and score
+subcarriers, run motion/heartbeat diagnostics, and export ML-ready datasets.
+
+Recent updates in this repo include:
+- a real-time terminal dashboard in `live_monitor.py` for live CSI capture
+- a ground-truth alignment pipeline in `align_and_baseline.py` for BPM sanity checks
+- subcarrier quality scoring and top-K selection for heartbeat-focused analysis
+- phase-based analysis support for complex I/Q captures
+- export options for `.npz` and CSV datasets for downstream ML workflows
 
 ## Content
 
@@ -29,31 +36,41 @@ the environment.
 ## Layout
 
 ```
-csi_analysis/
-├── main.py          # CLI entry point
-├── decoder.py        # PCAP parsing + Nexmon header/CSI decoding (int16 & float formats)
-├── analysis.py        # Amplitude/phase, subcarrier selection, variance, FFT motion detection
-├── plotting.py        # Time plots, heatmaps, FFT plots (headless-safe)
-├── filters.py         # Hampel filter, Butterworth band-pass/low-pass, drift removal, normalization
-├── quality.py         # Subcarrier quality scoring (variance, spectral strength, stability, optional GT correlation)
-├── utils.py           # Save/load to .npz / .csv, logging setup
-├── align_and_baseline.py # Align CSI + ground-truth heart-rate CSVs, FFT-estimate BPM per window
-├── requirements.txt
-└── example_pcap/        # put test captures here
+WiPulse/
+├── app/
+│   ├── main.py                 # Offline pcap analysis CLI
+│   ├── live_monitor.py         # Real-time terminal dashboard and live capture
+│   ├── decoder.py              # PCAP parsing + Nexmon header/CSI decoding
+│   ├── analysis.py             # Amplitude/phase, subcarrier selection, variance, FFT motion detection
+│   ├── plotting.py             # Headless-safe plots for time series, heatmaps, FFT, and pipeline stages
+│   ├── filters.py              # Hampel, Butterworth, drift removal, and normalization
+│   ├── quality.py              # Subcarrier quality scoring with optional ground-truth correlation
+│   ├── utils.py                # Save/load helpers, logging, and dataset utilities
+│   ├── align_and_baseline.py   # CSI + ground-truth alignment and BPM sanity-check workflow
+│   ├── heartbeat-giop.py       # Ground-truth heartbeat reference capture helper
+│   ├── requirements.txt
+│   └── scripts/
+│       ├── optimized-fast-sender.py
+│       └── rssi_data-extensive.py
+├── tests/
+└── notes/
 ```
 
 ## Setup
 
 ```bash
-# Create an enviroment
-python3 -m venv csi_env
-
-# Activate the enviroment
-source test/bin/activate
-
-# Install pre-requirements to enviroment
+cd app
+python3 -m venv .venv
+source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
+
+## Recommended workflow
+
+1. Validate a capture with `main.py --stats-only`.
+2. Inspect motion/heartbeat structure with plots and variance/FFT output.
+3. Record live CSI and ground-truth data together for a sanity check.
+4. Use `align_and_baseline.py` to confirm that the CSI signal contains a usable heart-rate signature before moving to ML.
 
 ## Chip / bandwidth
 

@@ -75,7 +75,12 @@ import matplotlib
 matplotlib.use("Agg")  # headless-safe, same convention as plotting.py
 import matplotlib.pyplot as plt
 
-from filters import butterworth_bandpass
+from filters import (
+    butterworth_bandpass,
+    hampel_filter,
+    normalize_signal,
+    remove_dc_drift,
+)
 
 logger = logging.getLogger("csi_analysis.align_and_baseline")
 
@@ -312,6 +317,224 @@ def resample_uniform(ts: np.ndarray, x: np.ndarray, fs: float) -> Tuple[np.ndarr
     t_uniform = t0 + np.arange(n) / fs
     x_uniform = np.interp(t_uniform, ts, x)
     return t_uniform, x_uniform
+
+
+def resample_matrix_uniform(ts: np.ndarray, matrix: np.ndarray, fs: float) -> Tuple[np.ndarray, np.ndarray]:
+    """Resample every column of a 2D matrix onto a shared uniform time grid."""
+    matrix = np.asarray(matrix, dtype=np.float64)
+    if matrix.ndim != 2:
+        raise ValueError("matrix must be a 2D array of shape (time, subcarriers)")
+    if matrix.shape[0] != len(ts):
+        raise ValueError(f"Expected {matrix.shape[0]} timestamps for the matrix, got {len(ts)}")
+
+    t_uniform, _ = resample_uniform(ts, matrix[:, 0], fs)
+    out = np.empty((t_uniform.shape[0], matrix.shape[1]), dtype=np.float64)
+    out[:, 0] = np.interp(t_uniform, ts, matrix[:, 0])
+    for col in range(1, matrix.shape[1]):
+        out[:, col] = np.interp(t_uniform, ts, matrix[:, col])
+    return t_uniform, out
+
+
+def preprocess_signal_matrix(
+    matrix: np.ndarray,
+    fs_hz: float,
+    low_hz: float,
+    high_hz: float,
+    hampel_window: int = 51,
+    hampel_sigmas: float = 3.0,
+) -> np.ndarray:
+    """Apply the preprocessing chain independently to each subcarrier column."""
+    matrix = np.asarray(matrix, dtype=np.float64)
+    filtered = hampel_filter(matrix, window_size=hampel_window, n_sigmas=hampel_sigmas)
+    filtered = butterworth_bandpass(filtered, low_hz=low_hz, high_hz=high_hz, fs_hz=fs_hz)
+    filtered = remove_dc_drift(filtered)
+    filtered = normalize_signal(filtered)
+    return filtered
+
+
+def compute_subcarrier_quality(
+    matrix: np.ndarray,
+    fs_hz: float,
+    low_hz: float,
+    high_hz: float,
+) -> List[dict]:
+    """Compute lightweight quality metrics for each subcarrier after preprocessing."""
+    matrix = np.asarray(matrix, dtype=np.float64)
+    metrics: List[dict] = []
+
+    for col in range(matrix.shape[1]):
+        signal = matrix[:, col]
+        variance = float(np.var(signal))
+        signal_centered = signal - np.mean(signal)
+        spec = np.fft.rfft(signal_centered)
+        freqs = np.fft.rfftfreq(len(signal_centered), d=1.0 / fs_hz)
+        mag = np.abs(spec)
+        band_mask = (freqs >= low_hz) & (freqs <= high_hz)
+        band_energy = float(np.sum(mag[band_mask] ** 2) / (np.sum(mag ** 2) + 1e-8)) if np.any(band_mask) else 0.0
+        if len(signal) > 1:
+            p = np.abs(np.fft.rfft(signal_centered))
+            p = p / (p.sum() + 1e-8)
+            spectral_entropy = float(-np.sum(p * np.log(p + 1e-12)))
+        else:
+            spectral_entropy = 0.0
+        peak_strength = float(np.max(mag[band_mask]) / (np.median(mag[~band_mask]) + 1e-8)) if np.any(band_mask) and np.any(~band_mask) else float(np.max(mag[band_mask]))
+        score = 0.35 * np.clip(variance, 0.0, 1.0) + 0.35 * np.clip(band_energy, 0.0, 1.0) + 0.15 * np.clip(peak_strength, 0.0, 1.0) + 0.15 * np.clip(1.0 - spectral_entropy, 0.0, 1.0)
+        metrics.append({
+            "variance": variance,
+            "band_energy": band_energy,
+            "peak_strength": peak_strength,
+            "spectral_entropy": spectral_entropy,
+            "score": float(score),
+        })
+
+    return metrics
+
+
+def select_subcarriers(
+    processed_matrix: np.ndarray,
+    fs_hz: float,
+    low_hz: float,
+    high_hz: float,
+    top_k: int = 10,
+    selected_indices: Optional[Sequence[int]] = None,
+) -> Tuple[List[int], List[dict]]:
+    """Rank subcarriers and return the selected indices plus per-carrier metrics."""
+    if selected_indices is not None:
+        indices = [int(idx) for idx in selected_indices]
+        metrics = [compute_subcarrier_quality(processed_matrix[:, idx : idx + 1], fs_hz, low_hz, high_hz)[0] for idx in indices]
+        return indices, metrics
+
+    metrics = compute_subcarrier_quality(processed_matrix, fs_hz, low_hz, high_hz)
+    scores = np.array([m["score"] for m in metrics], dtype=np.float64)
+    ranked = np.argsort(scores)[::-1]
+    n_keep = max(1, min(int(top_k), len(ranked)))
+    selected = ranked[:n_keep].tolist()
+    return selected, [metrics[idx] for idx in selected]
+
+
+def build_windowed_dataset(
+    processed_matrix: np.ndarray,
+    t_uniform: np.ndarray,
+    gt_ts: np.ndarray,
+    gt_bpm: np.ndarray,
+    window_size_packets: int,
+    step_packets: int,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Create sliding windows from the processed matrix and attach average GT BPM labels."""
+    processed_matrix = np.asarray(processed_matrix, dtype=np.float64)
+    if processed_matrix.shape[0] < window_size_packets:
+        raise ValueError(
+            f"Need at least {window_size_packets} packets for a window, got {processed_matrix.shape[0]}"
+        )
+
+    starts = list(range(0, processed_matrix.shape[0] - window_size_packets + 1, step_packets))
+    if not starts:
+        starts = [0]
+
+    windows = np.empty((len(starts), window_size_packets, processed_matrix.shape[1]), dtype=np.float64)
+    labels = np.empty(len(starts), dtype=np.float64)
+    centers = np.empty(len(starts), dtype=np.float64)
+
+    for idx, start in enumerate(starts):
+        end = start + window_size_packets
+        windows[idx] = processed_matrix[start:end, :]
+        t0 = float(t_uniform[start])
+        t1 = float(t_uniform[end - 1])
+        centers[idx] = 0.5 * (t0 + t1)
+        mask = (gt_ts >= t0) & (gt_ts <= t1)
+        if np.any(mask):
+            labels[idx] = float(np.mean(gt_bpm[mask]))
+        elif len(gt_ts) > 0:
+            labels[idx] = float(np.interp(centers[idx], gt_ts, gt_bpm))
+        else:
+            labels[idx] = float("nan")
+
+    return windows, labels, centers
+
+
+def prepare_ml_dataset(
+    csi_ts: np.ndarray,
+    signal_matrix: np.ndarray,
+    gt_ts: np.ndarray,
+    gt_bpm: np.ndarray,
+    fs_hz: float,
+    window_size_packets: int = 100,
+    step_packets: int = 20,
+    selected_subcarriers: Optional[Sequence[int]] = None,
+    low_hz: float = 0.7,
+    high_hz: float = 2.5,
+    top_k: int = 10,
+    hampel_window: int = 51,
+    hampel_sigmas: float = 3.0,
+) -> Dict[str, np.ndarray | List[dict] | List[int] | dict]:
+    """Produce a preprocessing-based ML dataset from CSI amplitude/time data."""
+    t_uniform, resampled = resample_matrix_uniform(csi_ts, signal_matrix, fs_hz)
+    processed = preprocess_signal_matrix(
+        resampled,
+        fs_hz=fs_hz,
+        low_hz=low_hz,
+        high_hz=high_hz,
+        hampel_window=hampel_window,
+        hampel_sigmas=hampel_sigmas,
+    )
+
+    if selected_subcarriers is not None:
+        selected_indices = [int(idx) for idx in selected_subcarriers]
+        selected_metrics = [compute_subcarrier_quality(processed[:, idx : idx + 1], fs_hz, low_hz, high_hz)[0] for idx in selected_indices]
+    else:
+        selected_indices, selected_metrics = select_subcarriers(processed, fs_hz, low_hz, high_hz, top_k=top_k)
+
+    processed_matrix = processed[:, selected_indices]
+    windows, labels, centers = build_windowed_dataset(
+        processed_matrix,
+        t_uniform,
+        gt_ts,
+        gt_bpm,
+        window_size_packets=window_size_packets,
+        step_packets=step_packets,
+    )
+
+    return {
+        "t_uniform": t_uniform,
+        "processed_matrix": processed_matrix,
+        "selected_subcarriers": selected_indices,
+        "quality_metrics": selected_metrics,
+        "windows": windows,
+        "labels": labels,
+        "window_centers": centers,
+    }
+
+
+def save_ml_dataset_artifacts(
+    out_dir: str,
+    processed_matrix: np.ndarray,
+    selected_subcarriers: Sequence[int],
+    labels: np.ndarray,
+    windows: np.ndarray,
+    quality_metrics: Sequence[dict],
+) -> None:
+    os.makedirs(out_dir, exist_ok=True)
+    np.save(os.path.join(out_dir, "processed_csi.npy"), processed_matrix)
+    np.savetxt(os.path.join(out_dir, "processed_csi.csv"), processed_matrix, delimiter=",")
+    np.savetxt(os.path.join(out_dir, "labels.csv"), labels.reshape(-1, 1), delimiter=",", fmt="%.6f")
+
+    quality_rows = []
+    for idx, metric in zip(selected_subcarriers, quality_metrics):
+        quality_rows.append({"subcarrier": idx, **metric})
+    with open(os.path.join(out_dir, "quality_scores.csv"), "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["subcarrier", "variance", "band_energy", "peak_strength", "spectral_entropy", "score"])
+        writer.writeheader()
+        for row in quality_rows:
+            writer.writerow(row)
+
+    with open(os.path.join(out_dir, "selected_subcarriers.csv"), "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["subcarrier"])
+        for idx in selected_subcarriers:
+            writer.writerow([idx])
+
+    np.save(os.path.join(out_dir, "training_windows.npy"), windows)
+    np.savetxt(os.path.join(out_dir, "training_windows.csv"), windows.reshape(windows.shape[0], -1), delimiter=",")
 
 
 def windowed_fft_bpm(t_uniform: np.ndarray, x_filtered: np.ndarray, fs: float,
@@ -621,8 +844,7 @@ def write_summary(out_dir: str, subcarrier_rows: List[dict], topn_results: List[
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
-        description="Align CSI + ground-truth heart-rate CSVs and FFT-estimate BPM per window "
-                    "as a baseline check before building an ML model.",
+        description="Prepare a cleaned CSI dataset for ML or run the legacy FFT-baseline pipeline.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--csi-csv", required=True, help="Path to a csi_capture_*.csv from live_monitor.py")
@@ -634,6 +856,12 @@ def parse_args(argv=None):
                         "columns) instead of the mean across all subcarriers")
     p.add_argument("--search-subcarriers", action="store_true",
                    help="Evaluate every subcarrier and the average of the top-ranked subcarrier groups")
+    p.add_argument("--prepare-ml", action="store_true",
+                   help="Create the preprocessing-based ML dataset (processed matrix, windows, labels) and skip FFT BPM estimation")
+    p.add_argument("--baseline", action="store_true",
+                   help="Run the legacy FFT-based baseline validation path")
+    p.add_argument("--mode", choices=["prepare-ml", "baseline"], default=None,
+                   help="Explicitly choose the pipeline mode")
 
     p.add_argument("--signal-type", choices=["amplitude", "phase"], default="amplitude",
                    help="'amplitude' (default) uses sc*_amp or sc*_re/sc*_im magnitude. "
@@ -647,6 +875,12 @@ def parse_args(argv=None):
                         "the raw bin frequency instead. Interpolation is on by default since the "
                         "raw bin pick quantizes BPM estimates to fs/window_s Hz steps "
                         "(7.5 BPM at the default 100 Hz / 8s window).")
+    p.add_argument("--window-size-packets", type=int, default=100,
+                   help="Window length in packets for the ML dataset")
+    p.add_argument("--step-packets", type=int, default=20,
+                   help="Step size in packets for sliding windows")
+    p.add_argument("--top-k", type=int, default=10,
+                   help="Number of top-ranked subcarriers to keep for the prepared ML dataset")
 
     p.add_argument("--low-hz", type=float, default=0.5,
                    help="Low edge of the heart-rate band-pass (Hz); default matches 30 BPM")
@@ -654,7 +888,12 @@ def parse_args(argv=None):
                    help="High edge of the heart-rate band-pass (Hz); default matches ~220 BPM")
 
     p.add_argument("--verbose", "-v", action="store_true")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if args.prepare_ml and args.baseline:
+        p.error("Choose either --prepare-ml or --baseline, not both")
+    if args.mode is None:
+        args.mode = "prepare-ml" if args.prepare_ml else "baseline"
+    return args
 
 
 def main(argv=None):
@@ -711,6 +950,38 @@ def main(argv=None):
                 args.low_hz, args.high_hz, args.low_hz * 60, args.high_hz * 60)
 
     os.makedirs(args.out_dir, exist_ok=True)
+
+    if args.mode == "prepare-ml":
+        if args.signal_type == "phase":
+            logger.warning("Phase-mode preprocessing is available, but the ML dataset path uses the same amplitude/phase matrix as the input")
+        selected_subcarriers = None
+        if args.subcarrier is not None:
+            selected_subcarriers = [args.subcarrier]
+
+        prepared = prepare_ml_dataset(
+            csi_ts,
+            signal_matrix,
+            gt_ts,
+            gt_avg_bpm,
+            fs_hz=fs_est,
+            window_size_packets=args.window_size_packets,
+            step_packets=args.step_packets,
+            selected_subcarriers=selected_subcarriers,
+            low_hz=args.low_hz,
+            high_hz=args.high_hz,
+            top_k=args.top_k,
+        )
+        save_ml_dataset_artifacts(
+            args.out_dir,
+            prepared["processed_matrix"],
+            prepared["selected_subcarriers"],
+            prepared["labels"],
+            prepared["windows"],
+            prepared["quality_metrics"],
+        )
+        logger.info("Prepared ML dataset with %d windows and %d selected subcarriers", prepared["windows"].shape[0], prepared["processed_matrix"].shape[1])
+        logger.info("Saved ML artifacts to: %s", os.path.abspath(args.out_dir))
+        return 0
 
     if args.search_subcarriers:
         subcarrier_rows = []
