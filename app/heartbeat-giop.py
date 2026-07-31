@@ -1,4 +1,5 @@
 import csv
+import os
 import sys
 import threading
 import time
@@ -47,7 +48,7 @@ def _write_header(writer):
 
 
 def start_capture() -> Optional[Path]:
-    global capture_active, capture_file, latest_file, capture_writer, latest_writer, capture_path, latest_path
+    global capture_active, capture_file, latest_file, capture_writer, latest_writer, capture_path, latest_path, capture_start_time
     if capture_active:
         return capture_path
 
@@ -61,6 +62,8 @@ def start_capture() -> Optional[Path]:
     latest_writer = csv.writer(latest_file)
     _write_header(capture_writer)
     _write_header(latest_writer)
+    capture_file.flush()
+    latest_file.flush()
     capture_active = True
     capture_start_time = time.time()
     return capture_path
@@ -75,6 +78,10 @@ def stop_capture() -> None:
     for handle in (capture_file, latest_file):
         if handle is not None:
             handle.flush()
+            try:
+                os.fsync(handle.fileno())
+            except OSError:
+                pass
             handle.close()
     capture_file = None
     latest_file = None
@@ -99,8 +106,8 @@ def render_status(message: str) -> None:
     global latest_display
     if not message:
         message = "idle"
-    padding = " " * max(0, len(latest_display) - len(message))
-    sys.stdout.write(f"\r{message}{padding}")
+    clear_tail = " " * 80
+    sys.stdout.write(f"\r{message}{clear_tail}")
     sys.stdout.flush()
     latest_display = message
 
@@ -110,7 +117,7 @@ def build_status_line() -> str:
     if capture_active and capture_start_time is not None:
         elapsed = time.time() - capture_start_time
         return (
-            f"REC ON  beats={valid_beats}  rejected={rejected_beats}  "
+            f"REC ON  BUSY CAPTURING  beats={valid_beats}  rejected={rejected_beats}  "
             f"elapsed={elapsed:5.1f}s"
         )
     return f"REC OFF  beats={valid_beats}  rejected={rejected_beats}"
@@ -149,7 +156,12 @@ def watchdog() -> None:
 def poll_key() -> Optional[str]:
     if msvcrt is not None:
         if msvcrt.kbhit():
-            return msvcrt.getwch().lower()
+            ch = msvcrt.getwch()
+            # ignore extended keys like arrows
+            if ch in ("\x00", "\xe0"):
+                msvcrt.getwch()
+                return None
+            return ch.lower()
         return None
 
     try:
@@ -161,8 +173,10 @@ def poll_key() -> Optional[str]:
         if not select.select([sys.stdin], [], [], 0.0)[0]:
             return None
         old = termios.tcgetattr(fd)
+        new = termios.tcgetattr(fd)
+        new[3] = new[3] & ~(termios.ICANON | termios.ECHO)
         try:
-            tty.setcbreak(fd)
+            termios.tcsetattr(fd, termios.TCSADRAIN, new)
             return sys.stdin.read(1).lower()
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
@@ -181,8 +195,8 @@ try:
                 stop_capture()
                 render_status(f"REC OFF  capture stopped  {build_status_line()}")
             else:
-                start_capture()
-                render_status(f"REC ON   capture started  {build_status_line()}")
+                path = start_capture()
+                render_status(f"REC ON   capture started  {build_status_line()}  file={path.name if path else 'unknown'}")
         elif key == "q":
             break
 
