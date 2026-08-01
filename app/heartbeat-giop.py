@@ -33,6 +33,8 @@ capture_file: Optional[object] = None
 capture_writer: Optional[csv.writer] = None
 capture_path: Optional[Path] = None
 latest_display = ""
+stdin_fd: Optional[int] = None
+stdin_old_attrs = None
 state_lock = threading.Lock()
 
 capture_start_time: Optional[float] = None
@@ -141,6 +143,50 @@ def watchdog() -> None:
         render_status(f"[warn] no valid beat in {time.time() - last_report_time:.1f}s -- check sensor contact  {build_status_line()}")
 
 
+def _setup_keyboard() -> None:
+    global stdin_fd, stdin_old_attrs
+    if msvcrt is not None:
+        return
+    try:
+        import termios
+        import tty
+    except ImportError:
+        return
+
+    if not sys.stdin.isatty():
+        return
+
+    fd = sys.stdin.fileno()
+    try:
+        stdin_old_attrs = termios.tcgetattr(fd)
+    except Exception:
+        return
+
+    new_attrs = stdin_old_attrs[:]
+    new_attrs[3] &= ~(termios.ICANON | termios.ECHO)
+    new_attrs[6][termios.VMIN] = 0
+    new_attrs[6][termios.VTIME] = 0
+    try:
+        termios.tcsetattr(fd, termios.TCSADRAIN, new_attrs)
+        stdin_fd = fd
+    except Exception:
+        stdin_fd = None
+        stdin_old_attrs = None
+
+
+def _restore_keyboard() -> None:
+    global stdin_fd, stdin_old_attrs
+    if msvcrt is not None or stdin_fd is None or stdin_old_attrs is None:
+        return
+    try:
+        import termios
+        termios.tcsetattr(stdin_fd, termios.TCSADRAIN, stdin_old_attrs)
+    except Exception:
+        pass
+    stdin_fd = None
+    stdin_old_attrs = None
+
+
 def poll_key() -> Optional[str]:
     if msvcrt is not None:
         if msvcrt.kbhit():
@@ -154,21 +200,14 @@ def poll_key() -> Optional[str]:
 
     try:
         import select
-        import termios
-        import tty
 
-        if not sys.stdin.isatty():
+        if stdin_fd is None:
             return None
 
-        fd = sys.stdin.fileno()
-        old_attrs = termios.tcgetattr(fd)
-        try:
-            tty.setcbreak(fd)
-            if not select.select([sys.stdin], [], [], 0.0)[0]:
-                return None
-            return sys.stdin.read(1).lower()
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+        if not select.select([sys.stdin], [], [], 0.0)[0]:
+            return None
+        ch = sys.stdin.read(1)
+        return ch.lower() if ch else None
     except Exception:
         return None
 
@@ -176,6 +215,7 @@ def poll_key() -> Optional[str]:
 sensor.when_activated = beat
 
 try:
+    _setup_keyboard()
     print("Heartbeat capture ready. Press 'c' to start/stop recording, 'q' to quit.")
     while True:
         key = poll_key()
@@ -195,6 +235,7 @@ except KeyboardInterrupt:
     pass
 finally:
     stop_capture()
+    _restore_keyboard()
     sys.stdout.write("\n")
     sys.stdout.flush()
     print(f"Stopped. Latest capture written to {capture_path or output_dir / 'ground_truth_<timestamp>.csv'}")
