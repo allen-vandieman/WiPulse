@@ -203,6 +203,8 @@ def main(argv=None):
                     args.hampel_window, args.hampel_sigmas)
         amp = hampel_filter(amp, window_size=args.hampel_window, n_sigmas=args.hampel_sigmas)
 
+    amp_for_motion = amp  # default when fs<=0 and the block below is skipped
+
     fs = dataset.fs_est
     if fs > 0:
         logger.info("Applying Butterworth bandpass %.3f-%.3f Hz (fs=%.2f Hz)...",
@@ -214,6 +216,16 @@ def main(argv=None):
             amp = butterworth_lowpass(amp, cutoff_hz=args.lowpass_hz, fs_hz=fs)
 
         amp = remove_dc_drift(amp)
+
+        # Keep a pre-normalization copy for variance_analysis: motion_score
+        # divides by mean(amp), which normalize_signal deliberately drives to
+        # ~0 (z-scoring). Feeding normalized data into that division makes
+        # the result either 0 or astronomically large depending on which way
+        # floating-point noise pushes the near-zero mean -- not a real
+        # motion signal. variance_analysis wants amplitude in its original,
+        # positive-valued scale.
+        amp_for_motion = amp
+
         amp = normalize_signal(amp)
 
         if args.plot_pipeline and subcarrier_idx is not None and len(subcarrier_idx) > 0:
@@ -243,7 +255,7 @@ def main(argv=None):
             print(f"sc {idx}: score={quality['scores'][idx]:.4f}")
 
     # --- variance / motion score ---
-    var_stats = variance_analysis(amp)
+    var_stats = variance_analysis(amp_for_motion)
     print("\n=== Variance / motion score ===")
     print(f"motion_score (higher = more amplitude fluctuation): {var_stats['motion_score']:.5f}")
 
