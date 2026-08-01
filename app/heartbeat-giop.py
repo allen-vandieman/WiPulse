@@ -30,11 +30,8 @@ output_dir.mkdir(exist_ok=True)
 
 capture_active = False
 capture_file: Optional[object] = None
-latest_file: Optional[object] = None
 capture_writer: Optional[csv.writer] = None
-latest_writer: Optional[csv.writer] = None
 capture_path: Optional[Path] = None
-latest_path: Optional[Path] = None
 latest_display = ""
 state_lock = threading.Lock()
 
@@ -48,65 +45,56 @@ def _write_header(writer):
 
 
 def start_capture() -> Optional[Path]:
-    global capture_active, capture_file, latest_file, capture_writer, latest_writer, capture_path, latest_path, capture_start_time
+    global capture_active, capture_file, capture_writer, capture_path, capture_start_time
     if capture_active:
         return capture_path
 
     ts_tag = time.strftime("%Y%m%d_%H%M%S")
     capture_path = output_dir / f"ground_truth_{ts_tag}.csv"
-    latest_path = output_dir / "ground_truth.csv"
 
     capture_file = open(capture_path, "w", newline="")
-    latest_file = open(latest_path, "w", newline="")
     capture_writer = csv.writer(capture_file)
-    latest_writer = csv.writer(latest_file)
     _write_header(capture_writer)
-    _write_header(latest_writer)
     capture_file.flush()
-    latest_file.flush()
     capture_active = True
     capture_start_time = time.time()
     return capture_path
 
 
 def stop_capture() -> None:
-    global capture_active, capture_file, latest_file, capture_writer, latest_writer
+    global capture_active, capture_file, capture_writer
     if not capture_active:
         return
 
     capture_active = False
-    for handle in (capture_file, latest_file):
-        if handle is not None:
-            handle.flush()
-            try:
-                os.fsync(handle.fileno())
-            except OSError:
-                pass
-            handle.close()
+    if capture_file is not None:
+        capture_file.flush()
+        try:
+            os.fsync(capture_file.fileno())
+        except OSError:
+            pass
+        capture_file.close()
     capture_file = None
-    latest_file = None
     capture_writer = None
-    latest_writer = None
 
 
 def write_beat_row(ibi: float, instant_bpm: float, avg_bpm: float) -> None:
     global capture_active
     now_ts = f"{time.time():.3f}"
     row = [now_ts, f"{ibi:.4f}", f"{instant_bpm:.2f}", f"{avg_bpm:.2f}"]
-    if capture_active and capture_writer is not None and latest_writer is not None:
+    if capture_active and capture_writer is not None:
         capture_writer.writerow(row)
-        latest_writer.writerow(row)
         if capture_file is not None:
             capture_file.flush()
-        if latest_file is not None:
-            latest_file.flush()
 
 
 def render_status(message: str) -> None:
     global latest_display
     if not message:
         message = "idle"
-    clear_tail = " " * 80
+    clear_tail = ""
+    if len(latest_display) > len(message):
+        clear_tail = " " * (len(latest_display) - len(message))
     sys.stdout.write(f"\r{message}{clear_tail}")
     sys.stdout.flush()
     latest_display = message
@@ -208,4 +196,4 @@ finally:
     stop_capture()
     sys.stdout.write("\n")
     sys.stdout.flush()
-    print(f"Stopped. Latest capture written to {latest_path or output_dir / 'ground_truth.csv'}")
+    print(f"Stopped. Latest capture written to {capture_path or output_dir / 'ground_truth_<timestamp>.csv'}")
