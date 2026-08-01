@@ -198,6 +198,13 @@ def main(argv=None):
     amp = amplitude(csi_shifted, normalize=args.normalize_amp)
     ph = phase(csi_shifted, unwrap=False)
 
+    # Raw, unfiltered amplitude -- kept aside as the signal-level reference
+    # for motion_score. Hampel/bandpass/DC-drift-removal below all
+    # legitimately push the mean toward ~0 (that's what a bandpass filter
+    # with a nonzero low cutoff and a detrend step are supposed to do), so
+    # none of those are usable as "how strong is the signal" on their own.
+    raw_amp = amp.copy()
+
     if args.hampel:
         logger.info("Applying Hampel filter (window=%d, sigmas=%.1f)...",
                     args.hampel_window, args.hampel_sigmas)
@@ -255,7 +262,7 @@ def main(argv=None):
             print(f"sc {idx}: score={quality['scores'][idx]:.4f}")
 
     # --- variance / motion score ---
-    var_stats = variance_analysis(amp_for_motion)
+    var_stats = variance_analysis(amp_for_motion, raw_amp=raw_amp)
     print("\n=== Variance / motion score ===")
     print(f"motion_score (higher = more amplitude fluctuation): {var_stats['motion_score']:.5f}")
 

@@ -181,18 +181,31 @@ def select_subcarriers(csi: np.ndarray, indices: Optional[Sequence[int]] = None,
     return csi
 
 
-def variance_analysis(amp: np.ndarray) -> dict:
+def variance_analysis(amp: np.ndarray, raw_amp: Optional[np.ndarray] = None) -> dict:
     """
     Per-subcarrier variance/std over time (axis=0), plus a single scalar
     "motion score" (mean of per-subcarrier std, normalized by mean amplitude).
     A stationary/empty scene should give a low, stable score; movement or a
     new obstruction should visibly raise it.
+
+    raw_amp: optional separate amplitude array to use for the mean-amplitude
+        denominator, in place of mean(amp). Needed when `amp` has already
+        been through a bandpass filter and/or DC-drift removal -- both of
+        those deliberately drive the mean toward ~0 by design (a bandpass
+        filter with a nonzero low cutoff removes the 0 Hz/DC component
+        outright, and DC-drift removal subtracts a rolling mean), so using
+        `amp`'s own mean as "signal level" is unstable (the ratio flips
+        between ~0 and huge depending on which way floating-point noise
+        pushes an already-near-zero mean). Pass the true pre-filter
+        amplitude here to get a stable, meaningful signal-level reference;
+        per_sc_std/per_sc_var/per_sc_mean below still describe `amp` itself.
     """
     per_sc_mean = np.mean(amp, axis=0)
     per_sc_std = np.std(amp, axis=0)
     per_sc_var = np.var(amp, axis=0)
 
-    mean_amp = np.mean(amp)
+    level_ref = raw_amp if raw_amp is not None else amp
+    mean_amp = np.mean(level_ref)
     motion_score = float(np.mean(per_sc_std) / mean_amp) if mean_amp > 0 else 0.0
 
     # per-packet aggregate (mean amplitude across subcarriers, per packet) --
