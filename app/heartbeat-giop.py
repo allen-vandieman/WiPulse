@@ -157,17 +157,23 @@ def poll_key() -> Optional[str]:
         import termios
         import tty
 
+        if not sys.stdin.isatty():
+            return None
+
         fd = sys.stdin.fileno()
         if not select.select([sys.stdin], [], [], 0.0)[0]:
             return None
-        old = termios.tcgetattr(fd)
-        new = termios.tcgetattr(fd)
-        new[3] = new[3] & ~(termios.ICANON | termios.ECHO)
+
+        old_attrs = termios.tcgetattr(fd)
+        new_attrs = old_attrs[:]
+        new_attrs[3] = new_attrs[3] & ~(termios.ICANON | termios.ECHO)
+        new_attrs[6][termios.VMIN] = 1
+        new_attrs[6][termios.VTIME] = 0
         try:
-            termios.tcsetattr(fd, termios.TCSADRAIN, new)
+            termios.tcsetattr(fd, termios.TCSADRAIN, new_attrs)
             return sys.stdin.read(1).lower()
         finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
     except Exception:
         return None
 
