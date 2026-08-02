@@ -42,7 +42,7 @@ from analysis import (
     amplitude, phase, select_subcarriers, variance_analysis, fft_motion_detection,
     stream_breakdown, select_stream,
 )
-from filters import hampel_filter, butterworth_lowpass, butterworth_bandpass, remove_dc_drift, normalize_signal
+from filters import hampel_filter, butterworth_lowpass, butterworth_bandpass, remove_dc_drift, normalize_signal, notch_filter
 from quality import evaluate_subcarriers
 from plotting import plot_amplitude_time, plot_phase_time, plot_heatmap, plot_fft, plot_variance_bar, plot_pipeline_stages
 from utils import setup_logging, ensure_dir, save_npy, save_csv
@@ -97,6 +97,16 @@ def parse_args(argv=None):
     p.add_argument("--bandpass-high", type=float, default=2.5, help="Upper cutoff for the heartbeat-oriented Butterworth bandpass")
     p.add_argument("--lowpass-hz", type=float, default=None,
                    help="Apply a Butterworth low-pass filter at this cutoff (Hz) before FFT/plots")
+    p.add_argument("--notch-hz", default=None,
+                   help="Suppress a known narrowband interferer at this frequency (Hz) before "
+                        "the heartbeat bandpass -- e.g. an unexplained tone that shows up "
+                        "identically across captures regardless of room/motion (survives "
+                        "router-off/fan-off/relocation testing). Comma-separated for multiple "
+                        "frequencies, e.g. '2.0,4.0'. Applied after Hampel, before bandpass.")
+    p.add_argument("--notch-q", type=float, default=30.0,
+                   help="Q factor (center_freq / bandwidth) for --notch-hz. Higher = narrower "
+                        "notch, cuts less of the signal on either side; lower = wider notch, "
+                        "more tolerant if the interferer drifts between captures.")
 
     # outputs
     p.add_argument("--heatmap", action="store_true", help="Save a packet x subcarrier amplitude heatmap")
@@ -132,6 +142,14 @@ def main(argv=None):
             subcarrier_idx = [int(x) for x in args.subcarriers.split(",")]
         except ValueError:
             logger.error("--subcarriers must be a comma-separated list of ints, got: %s", args.subcarriers)
+            return 1
+
+    notch_freqs = None
+    if args.notch_hz:
+        try:
+            notch_freqs = [float(x) for x in str(args.notch_hz).split(",")]
+        except ValueError:
+            logger.error("--notch-hz must be a comma-separated list of numbers, got: %s", args.notch_hz)
             return 1
 
     # --- decode ---
@@ -214,6 +232,10 @@ def main(argv=None):
 
     fs = dataset.fs_est
     if fs > 0:
+        if notch_freqs is not None:
+            logger.info("Applying notch filter at %s Hz (Q=%.1f)...", notch_freqs, args.notch_q)
+            amp = notch_filter(amp, notch_hz=notch_freqs, fs_hz=fs, quality=args.notch_q)
+
         logger.info("Applying Butterworth bandpass %.3f-%.3f Hz (fs=%.2f Hz)...",
                     args.bandpass_low, args.bandpass_high, fs)
         amp = butterworth_bandpass(amp, low_hz=args.bandpass_low, high_hz=args.bandpass_high, fs_hz=fs)

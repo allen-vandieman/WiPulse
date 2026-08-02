@@ -11,6 +11,11 @@ Recent updates in this repo include:
 - subcarrier quality scoring and top-K selection for heartbeat-focused analysis
 - phase-based analysis support for complex I/Q captures
 - export options for `.npz` and CSV datasets for downstream ML workflows
+- `check_resample_artifact.py`, a diagnostic for telling a real RF-driven
+  frequency apart from an artifact of treating unevenly-spaced packets as
+  evenly spaced
+- a `--notch-hz` / `--notch-q` notch filter in `main.py` for suppressing a
+  known narrowband interferer before the heartbeat bandpass
 
 ## Content
 
@@ -21,7 +26,9 @@ Recent updates in this repo include:
 1. [Validate the capture](#step-1--validate-the-capture-is-well-formed)
 1. [Look at it](#step-2--look-at-it)
 1. [Movement test](#step-3--the-movement-test)
+1. [Diagnosing sample-rate/timing artifacts](#diagnosing-sample-ratetiming-artifacts)
 1. [Cleaning noisy data](#cleaning-noisy-data)
+1. [Suppressing a known interferer (notch filter)](#suppressing-a-known-interferer-notch-filter)
 1. [Ground-truth-first quality testing](#ground-truth-first-quality-testing)
 1. [Exporting for ML](#exporting-for-ml)
 1. [Flags reference](#useful-flags-reference)
@@ -47,6 +54,7 @@ WiPulse/
 │   ├── quality.py              # Subcarrier quality scoring with optional ground-truth correlation
 │   ├── utils.py                # Save/load helpers, logging, and dataset utilities
 │   ├── align_and_baseline.py   # CSI + ground-truth alignment and BPM sanity-check workflow
+│   ├── check_resample_artifact.py  # Diagnoses naive-FFT-vs-real-timing artifacts from packet loss
 │   ├── heartbeat-giop.py       # Ground-truth heartbeat reference capture helper
 │   ├── requirements.txt
 │   └── scripts/
@@ -176,6 +184,52 @@ sign to check antenna placement/orientation, TX rate (needs to be fast
 enough relative to the motion you're trying to catch — Nyquist), or whether
 you're actually capturing on the right interface/channel.
 
+## Diagnosing sample-rate/timing artifacts
+
+`main.py --fft` (and `fft_motion_detection` under the hood) runs its FFT
+*by packet index*, assuming packets arrived evenly spaced at
+`dataset.fs_est` (the *average* rate over the whole capture). If a capture
+actually has meaningful packet loss, especially bursty loss rather than
+loss spread evenly through the capture, the real time axis is irregular
+and that irregularity can alias into a spurious "dominant frequency" that
+has nothing to do with anything physical in the room.
+
+`check_resample_artifact.py` isolates that question on a single pcap by
+computing the dominant frequency two ways and comparing them:
+
+```bash
+python check_resample_artifact.py --pcap test/baseline.pcap \
+    --chip 43455c0 --bw 80 --bandpass-low 0.7 --bandpass-high 2.5
+```
+
+- **"naive"** — exactly what `main.py --fft` does: index-based FFT at
+  `fs_est`, ignoring real timestamps.
+- **"resampled"** — the same signal linearly interpolated onto a *true*
+  uniform time grid first (`align_and_baseline.resample_uniform`), so gaps
+  are handled honestly, then FFT'd.
+
+If the two dominant frequencies agree closely (within roughly one FFT bin,
+`1/capture_duration`), the naive result was trustworthy for that capture —
+whatever frequency you're seeing is real, not a loss artifact. If they
+diverge substantially, packet loss is distorting the naive FFT, and you
+should either trust the resampled number or get a lower-loss capture
+before drawing conclusions from `main.py --fft`'s output.
+
+This is worth running any time you're chasing an unexplained frequency
+(like a mystery peak that shows up regardless of what's actually happening
+in the room) before spending time hunting for a physical/RF cause — rule
+out "it's just how the tool handles packet loss" first. It's also useful
+sanity-checking for a good, low-loss capture: agreement there confirms the
+frequency reading is meaningful before you rely on it for a notch (see
+below) or for interpreting `--fft` results in general.
+
+Note this script duplicates a slice of `main.py`'s amplitude pipeline
+(decode → fftshift → amplitude → bandpass) rather than reusing it directly,
+and averages across subcarriers *before* filtering rather than after —
+so don't expect its frequency numbers to match `main.py --fft` exactly
+even on the same pcap; it's meant for the naive-vs-resampled comparison,
+not as a drop-in replacement for `main.py`.
+
 ## Cleaning noisy data
 
 ```bash
@@ -198,6 +252,91 @@ This is the new recommended heartbeat-focused preprocessing pipeline:
   useful for debugging when the signal looks weak or unstable.
 - `--quality-top-k` and `--quality-threshold` rank carriers with the new
   subcarrier-quality scorer and keep only the most informative ones.
+
+## Suppressing a known interferer (notch filter)
+
+If `--fft` (or `check_resample_artifact.py`, once you've ruled out a
+sampling-rate artifact) turns up a stable, narrowband frequency that shows
+up identically across captures regardless of what's actually happening in
+the room — survives router-off, fan-off, and relocating the Pis — that's a
+real but unwanted narrowband signal sitting in your capture, and it can be
+suppressed with a notch filter before the heartbeat bandpass:
+
+```bash
+python main.py --pcap movement.pcap --chip 43455c0 --bw 80 \
+    --out-dir results/movement --hampel --notch-hz 2.0 --notch-q 15 \
+    --bandpass-low 0.7 --bandpass-high 2.5 --fft --heatmap
+```
+
+This applies `filters.notch_filter` (a zero-phase IIR notch,
+`scipy.signal.iirnotch` + `filtfilt`) in the pipeline right after `--hampel`
+and before the bandpass. Unlike the bandpass, which keeps only a range and
+discards everything else, the notch keeps everything and removes only a
+thin slice around the target frequency — use it to clean an interferer out
+before the bandpass does its normal job, not as a substitute for the
+bandpass.
+
+### How `--notch-hz` works
+
+- Pass a single frequency in Hz, e.g. `--notch-hz 2.0`, to suppress a peak
+  at 2 Hz.
+- Pass a comma-separated list, e.g. `--notch-hz 2.0,4.0`, to suppress
+  several frequencies (each notch is applied in sequence) — useful if the
+  interferer has a harmonic.
+- Each frequency must be strictly between 0 and the Nyquist frequency
+  (`fs_est / 2`) for the capture; the CLI will error out with the valid
+  range if not.
+- **Default: off.** If `--notch-hz` isn't passed, no notch filter runs at
+  all — the pipeline behaves exactly as it did before this option existed.
+  There's no separate flag needed to disable it; simply omit `--notch-hz`.
+
+### How `--notch-q` works
+
+`--notch-q` sets the filter's Q factor (`center_frequency / bandwidth`),
+which controls how narrow the cut is:
+
+- **Higher Q → narrower notch.** Removes less of your real signal on
+  either side of the target frequency, but only cuts a very tight band —
+  needs the interferer to be quite frequency-stable across captures to be
+  effective.
+- **Lower Q → wider notch.** More tolerant of the interferer drifting a
+  bit between captures (this project's own investigation found an
+  unexplained ~2 Hz peak that moved by as much as ~0.2 Hz between two
+  back-to-back captures under identical conditions), at the cost of also
+  suppressing more of any real signal that happens to fall near that
+  frequency.
+- **Default: `30`**, which gives roughly a `center_freq / 30` Hz-wide notch
+  (e.g. ~0.07 Hz wide at a 2 Hz notch — quite tight). If the interferer
+  you're targeting drifts noticeably between runs (check by comparing
+  `dominant_freq_hz` across a few captures first), lower this — something
+  in the `10-15` range is a reasonable starting point for a drifting ~2 Hz
+  peak specifically.
+- If in doubt, run with `--fft` before and after adding the notch and
+  compare `fft_motion.png` — the target peak should visibly shrink or
+  disappear. If it doesn't move much, lower `--notch-q` and try again
+  before assuming the notch isn't working.
+
+### How to bypass/disable it
+
+The notch filter is opt-in and off by default — just don't pass
+`--notch-hz` and nothing changes versus the standard pipeline. If you've
+been running with a notch and want to go back to unfiltered output for a
+specific run (e.g. to re-check whether the interferer is still present
+before deciding whether to keep notching it out), drop `--notch-hz` from
+the command entirely rather than passing an empty value:
+
+```bash
+# with notch
+python main.py --pcap movement.pcap --chip 43455c0 --bw 80 \
+    --out-dir results/movement --notch-hz 2.0 --fft
+
+# without -- just omit --notch-hz, everything else identical
+python main.py --pcap movement.pcap --chip 43455c0 --bw 80 \
+    --out-dir results/movement --fft
+```
+
+`--notch-q` has no effect on its own — it's only read when `--notch-hz` is
+also set, so there's nothing to unset separately.
 
 ## Ground-truth-first quality testing
 
@@ -258,6 +397,12 @@ Run `python main.py --help` for the full list; the ones worth knowing about:
   analysis (these carry no real channel information and can skew variance).
 - `--src-ip ''` — disable the `10.10.10.10` source-IP filter if your setup
   doesn't follow that nexmon_csi convention.
+- `--notch-hz 2.0` (with `--notch-q`) — suppress a known narrowband
+  interferer before the heartbeat bandpass; off by default, just omit it
+  to bypass. See [Suppressing a known interferer](#suppressing-a-known-interferer-notch-filter).
+- `check_resample_artifact.py` — separate script (not a `main.py` flag) for
+  telling a real frequency apart from a packet-loss/resampling artifact.
+  See [Diagnosing sample-rate/timing artifacts](#diagnosing-sample-ratetiming-artifacts).
 
 ## Reading the loss/stream diagnostics
 

@@ -10,7 +10,7 @@ glitches or RF interference.
 from __future__ import annotations
 
 import numpy as np
-from scipy.signal import butter, filtfilt
+from scipy.signal import butter, filtfilt, iirnotch
 
 
 def hampel_filter(x: np.ndarray, window_size: int = 7, n_sigmas: float = 3.0) -> np.ndarray:
@@ -101,6 +101,56 @@ def butterworth_bandpass(x: np.ndarray, low_hz: float, high_hz: float, fs_hz: fl
 
     b, a = butter(order, [low_hz / nyq, high_hz / nyq], btype="band")
     out = filtfilt(b, a, x, axis=0)
+    return out[:, 0] if was_1d else out
+
+
+def notch_filter(x: np.ndarray, notch_hz, fs_hz: float, quality: float = 30.0) -> np.ndarray:
+    """
+    Zero-phase IIR notch filter along axis 0 (time), for suppressing a
+    known, narrowband interferer at a specific frequency (e.g. an
+    unexplained ~2 Hz peak that survives router-off/fan-off/relocation
+    testing and shows up identically in every capture regardless of what's
+    actually happening in the room -- see check_resample_artifact.py for
+    ruling out sampling-rate artifacts before trusting a frequency enough
+    to notch it out).
+
+    x: 1D (time,) or 2D (time, subcarriers) array.
+    notch_hz: a single frequency (Hz) to suppress, or a sequence of
+        frequencies to apply sequentially (e.g. if you find more than one
+        offending peak). Each must be in (0, fs_hz/2).
+    fs_hz: sampling rate of x in Hz.
+    quality: Q factor for the notch (center_freq / bandwidth). Higher Q =
+        narrower notch, so it removes less of your real signal on either
+        side. Default 30 gives roughly a 1/30th-of-center-frequency-wide
+        notch (e.g. ~0.07 Hz wide at a 2 Hz notch) -- narrow enough to
+        avoid eating into an adjacent heartbeat band, but wide enough to
+        tolerate the interferer drifting a little between captures (this
+        project's ~2 Hz artifact has been observed to move by up to ~0.2 Hz
+        run to run). Lower this if the interferer is very stable and you
+        want a tighter cut; raise it if it wanders more than that.
+
+    Unlike butterworth_bandpass (which keeps only a range and discards
+    everything else), this keeps everything and removes only a thin slice
+    -- use it to clean an interferer out of a signal before a separate
+    heartbeat/motion bandpass, not as a substitute for that bandpass.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    nyq = fs_hz / 2.0
+
+    freqs = [notch_hz] if np.isscalar(notch_hz) else list(notch_hz)
+    for f in freqs:
+        if not (0 < f < nyq):
+            raise ValueError(f"notch_hz ({f}) must be in (0, {nyq}) given fs_hz={fs_hz}")
+
+    was_1d = x.ndim == 1
+    if was_1d:
+        x = x[:, None]
+
+    out = x
+    for f in freqs:
+        b, a = iirnotch(f, quality, fs=fs_hz)
+        out = filtfilt(b, a, out, axis=0)
+
     return out[:, 0] if was_1d else out
 
 
