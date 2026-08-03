@@ -68,6 +68,7 @@ def main():
     nfft = frames[0].csi.shape[0]
     csi = np.stack([f.csi for f in frames], axis=0)
     ts = np.array([f.ts for f in frames], dtype=np.float64)
+    seq_num = np.array([f.seq_num for f in frames], dtype=np.int64)
 
     csi_shifted = fftshift_subcarriers(csi)
     if args.exclude_dc_guard:
@@ -79,10 +80,21 @@ def main():
     duration = ts[-1] - ts[0]
     n_packets = len(ts)
     fs_est = (n_packets - 1) / duration if duration > 0 else 0.0
-    loss_pct = 100.0 * (1.0 - (n_packets / (fs_est * duration))) if fs_est > 0 else float("nan")
+
+    # Real loss estimate from 802.11 sequence-number gaps (same wraparound-
+    # aware logic as analysis.report_sequence_gaps) -- NOT derived from
+    # fs_est/duration/n_packets, which is circular (fs_est is itself
+    # computed from n_packets and duration, so comparing n_packets back
+    # against fs_est*duration always returns ~0% regardless of actual loss).
+    diffs = np.diff(seq_num)
+    diffs = np.where(diffs < -2048, diffs + 4096, diffs)  # 12-bit seqnum wraparound
+    estimated_lost = int(np.sum(diffs[diffs > 1] - 1))
+    total_expected = n_packets + estimated_lost
+    loss_pct = 100.0 * estimated_lost / total_expected if total_expected > 0 else float("nan")
 
     print(f"packets decoded: {n_packets}   span: {duration:.2f}s   fs_est: {fs_est:.2f} Hz")
-    print(f"(rough) missing-sample fraction implied by fs_est vs actual count: {loss_pct:.1f}%")
+    print(f"estimated lost (from sequence-number gaps): {estimated_lost}   "
+          f"loss: {loss_pct:.1f}%")
 
     if fs_est <= 0:
         print("fs_est <= 0, can't proceed.")
