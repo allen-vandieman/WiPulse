@@ -62,6 +62,17 @@ def evaluate_subcarriers(
     top_k: int = 10,
 ) -> dict:
     """
+    IMPORTANT: `signals` should be real-scale amplitude (e.g. straight out
+    of a Hampel/bandpass/DC-drift-removal chain), NOT output that has
+    already been through filters.normalize_signal(). variance_score below
+    assumes variance carries real information; feeding it z-scored input
+    (variance == 1.0 for every column, by construction) makes variance_score
+    collapse to a constant ~0.5 for every subcarrier regardless of the
+    actual signal, silently pinning 20% of the composite score and making
+    the ranking far more sensitive to noise/artifacts in the remaining
+    terms. Callers that need a normalized signal for something else (FFT,
+    plots) should keep a separate pre-normalization copy to pass in here.
+
     Score each subcarrier on a weighted combination of:
       - variance (temporal variability)
       - peak SNR-like spectral strength in a target band

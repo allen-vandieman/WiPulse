@@ -274,7 +274,7 @@ def main(argv=None):
                 x_axis=dataset.ts - dataset.ts[0],
             )
 
-        quality = evaluate_subcarriers(amp, fs_hz=fs, top_k=args.quality_top_k)
+        quality = evaluate_subcarriers(amp_for_motion, fs_hz=fs, top_k=args.quality_top_k)
         selected = quality["selected_indices"]
         if args.quality_threshold is not None:
             selected = [idx for idx in selected if quality["scores"][idx] >= args.quality_threshold]
