@@ -54,6 +54,7 @@ WiPulse/
 │   ├── quality.py              # Subcarrier quality scoring with optional ground-truth correlation
 │   ├── utils.py                # Save/load helpers, logging, and dataset utilities
 │   ├── align_and_baseline.py   # CSI + ground-truth alignment and BPM sanity-check workflow
+│   ├── hr_pipeline.py          # HR estimation pipeline for CSI captures
 │   ├── check_resample_artifact.py  # Diagnoses naive-FFT-vs-real-timing artifacts from packet loss
 │   ├── heartbeat-giop.py       # Ground-truth heartbeat reference capture helper
 │   ├── requirements.txt
@@ -79,6 +80,7 @@ pip install -r requirements.txt
 2. Inspect motion/heartbeat structure with plots and variance/FFT output.
 3. Record live CSI and ground-truth data together for a sanity check.
 4. Use `align_and_baseline.py` to confirm that the CSI signal contains a usable heart-rate signature before moving to ML.
+5. Run `hr_pipeline.py` to estimate BPM windows from CSI and optionally compare against ground-truth data.
 
 ## Chip / bandwidth
 
