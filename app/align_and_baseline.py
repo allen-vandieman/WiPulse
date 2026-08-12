@@ -688,7 +688,9 @@ def save_results_csv(windows: List[dict], out_path: str):
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
         for w in windows:
-            writer.writerow({k: w[k] for k in fields})
+            # Dynamically select fields that exist on the window dictionary 'w'
+            writeable_fields = [k for k in fields if k in w]
+            writer.writerow({k: w[k] for k in writeable_fields})
     logger.info("Saved windowed results: %s", out_path)
 
 
