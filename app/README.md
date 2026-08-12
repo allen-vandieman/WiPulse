@@ -646,4 +646,58 @@ Same flag works with `--signal-type phase` -- run both and compare the two
 curve with a higher peak correlation for phase is the signature that
 phase is picking up real per-tone heartbeat modulation that amplitude was
 missing, rather than the same systematic drift artifact.
+
+## Using `hr_pipeline.py`
+
+`hr_pipeline.py` is the simpler, purpose-built CLI for contactless heart-rate
+estimation from a CSI capture. It preprocesses the signal, ranks the most
+informative subcarriers, combines them into a single signal, and estimates
+BPM in sliding FFT windows.
+
+### Offline capture example
+
+```bash
+cd app
+py -3 hr_pipeline.py --pcap ../matlab/captures/csi_capture.pcap --chip 43455c0 --bw 80 --out-dir ../results/hr
 ```
+
+This decodes the pcap, filters the signal to the heartbeat band, selects the
+best carriers, and saves a CSV of windowed BPM estimates to
+`results/hr/hr_estimates.csv`.
+
+### CSV input example
+
+```bash
+cd app
+py -3 hr_pipeline.py --csi-csv ../output/csi_capture_20260812_120000.csv --gt-csv ../output/ground_truth.csv --out-dir ../results/hr
+```
+
+This is the quickest path when you already recorded CSI and ground-truth data
+with `live_monitor.py` and `heartbeat-giop.py`.
+
+### Useful flags
+
+- `--selected-subcarriers 3,7,12` — force a specific subcarrier set instead of
+  automatic ranking.
+- `--top-k 5` — number of top subcarriers to average when automatic ranking is used.
+- `--combine-method mean|median|sum` — how to merge the selected subcarriers.
+- `--low-hz` / `--high-hz` — heartbeat band edges, default `0.7` to `3.7` Hz.
+- `--window-s 8.0` — FFT window length in seconds.
+- `--overlap 0.5` — fractional overlap between consecutive sliding windows.
+- `--gt-csv path/to/ground_truth.csv` — optional validation against the pulse sensor.
+- `--no-fft-interp` — disable parabolic interpolation of the dominant FFT peak.
+
+### Output files
+
+The script writes the following files to the chosen output directory:
+
+- `hr_estimates.csv` — one row per FFT window with `est_bpm` and timing information
+- `selected_subcarriers.txt` — the subcarriers used for the estimate
+- optional ground-truth comparison metrics are printed to the console when `--gt-csv` is supplied
+
+### Typical workflow
+
+1. Capture CSI with `live_monitor.py` or decode an existing pcap.
+2. Record ground truth with `heartbeat-giop.py` if you want validation.
+3. Run `hr_pipeline.py`.
+4. Check `hr_estimates.csv` and compare the BPM trace to your pulse reference.
