@@ -32,3 +32,15 @@ Build a contactless heart-rate monitor using Wi-Fi CSI on Raspberry Pi, with rea
 ## Usage
 - Offline pcap: `python app/hr_pipeline.py --pcap csi_capture.pcap --chip 43455c0 --bw 80 --out-dir results/hr`
 - Live CSV: `python app/hr_pipeline.py --csi-csv output/csi_capture_20260728_101500.csv --gt-csv output/ground_truth.csv --out-dir results/hr`
+
+## Phase 2: Advanced Research & Implementation
+
+Building on the successful CSI extraction pipeline (Phase 1), Phase 2 focuses on integrating advanced signal processing methods derived from recent academic research found in the `research/` folder. The goal is to improve HR estimation accuracy and robustify performance against challenging environmental conditions.
+
+**Next Steps:**
+1. **Research Integration:** Systematically review papers and models stored in the `research/` directory (e.g., advanced feature extraction, deep learning approaches).
+2. **Method Implementation:** Select promising techniques (e.g., non-linear regression, specific spectral analysis) and implement wrappers or modules within `app/utils.py` or a new dedicated module to test their efficacy against current data.
+3. **Module Enhancement:** Update core modules like `hr_pipeline.py` and potentially add a new module for complex signal modeling.
+4. **Testing & Benchmarking:** Develop specific benchmarks in the `test/` directory that compare the standard FFT approach (Phase 1) against newly implemented research-based methods, using datasets from `app/output/`.
+
+**Target Output:** A validated, high-accuracy HR estimation pipeline ready for field deployment considerations.
