@@ -217,3 +217,16 @@ app/pcap/movement-slow.pcap
 app/pcap/movement-slow2.pcap
 app/pcap/movement-wild.pcap
 app/pcap/movement.pcap
+app/output/ground_truth.csv
+app/results/baseline_ml2/baseline_bpm_comparison.png
+app/results/baseline_ml2/baseline_results.csv
+app/results/baseline_ml2/best10_comparison.png
+app/results/baseline_ml2/best1_comparison.png
+app/results/baseline_ml2/best20_comparison.png
+app/results/baseline_ml2/best3_comparison.png
+app/results/baseline_ml2/best5_comparison.png
+app/results/baseline_ml2/correlation_vs_subcarrier.png
+app/results/baseline_ml2/mae_vs_subcarrier.png
+app/results/baseline_ml2/subcarrier_metrics.csv
+app/results/baseline_ml2/summary.txt
+app/results/baseline_ml2/top10_subcarriers.csv
