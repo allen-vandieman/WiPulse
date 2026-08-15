@@ -12,7 +12,9 @@ from processing_pipeline import (
     benchmark_pipeline_stages,
     compare_estimated_bpm_to_ground_truth,
     extract_amplitude_signal,
+    extract_phase_signal,
     remove_dc_component,
+    sanitize_phase_per_packet,
     savgol_smooth,
     segment_overlapping_windows,
     select_best_subcarriers_from_csi,
@@ -128,7 +130,28 @@ def test_benchmark_best_k_subcarriers_selects_best_candidate():
     ])
     gt_ts = np.linspace(0.0, 30.0, 6)
     gt_bpm = np.full_like(gt_ts, 66.0, dtype=float)
-    benchmark = benchmark_best_k_subcarriers(csi, gt_ts, gt_bpm, fs_hz=fs_hz, candidate_ks=(1, 2), low_hz=0.8, high_hz=2.17, window_size=12, hop_size=6)
+    benchmark = benchmark_best_k_subcarriers(csi, gt_ts, gt_bpm, fs_hz=fs_hz, candidate_ks=(1, 2), low_hz=0.8, high_hz=2.17, window_size=12, hop_size=6, signal_type="amplitude")
     assert len(benchmark["results"]) == 2
     assert benchmark["winner"]["k"] == 1
     assert benchmark["winner"]["selected_indices"] == [1]
+
+
+def test_extract_phase_signal_returns_angle():
+    csi = np.array([
+        [1.0 + 1.0j, 0.0 + 2.0j],
+        [3.0 + 4.0j, -1.0 + 1.0j],
+    ], dtype=np.complex128)
+    phase = extract_phase_signal(csi, unwrap=False)
+    assert phase.shape == csi.shape
+    assert np.isfinite(phase).all()
+    assert np.allclose(phase[0, 0], np.arctan2(1.0, 1.0))
+
+
+def test_sanitize_phase_per_packet_removes_linear_trend():
+    csi = np.array([
+        np.exp(1j * (0.1 * np.arange(8) + 0.5)),
+        np.exp(1j * (0.2 * np.arange(8) - 0.3)),
+    ], dtype=np.complex128)
+    sanitized = sanitize_phase_per_packet(csi)
+    assert sanitized.shape == csi.shape
+    assert np.isfinite(sanitized).all()

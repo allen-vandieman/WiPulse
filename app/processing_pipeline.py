@@ -27,6 +27,43 @@ def amplitude_from_complex(csi: np.ndarray) -> np.ndarray:
     return extract_amplitude_signal(csi)
 
 
+def extract_phase_signal(csi: np.ndarray, unwrap: bool = True) -> np.ndarray:
+    """Return the phase (radians) per packet/subcarrier, optionally unwrapped along subcarrier axis."""
+    csi = np.asarray(csi, dtype=np.complex128)
+    phase = np.angle(csi)
+    if unwrap and phase.ndim == 2:
+        phase = np.unwrap(phase, axis=1)
+    return phase
+
+
+def sanitize_phase_per_packet(csi: np.ndarray) -> np.ndarray:
+    """Remove SFO/CFO linear phase ramp from each packet via per-subcarrier least-squares fit.
+    
+    Returns sanitized phase (radians) of shape (n_packets, nfft).
+    """
+    csi = np.asarray(csi, dtype=np.complex128)
+    if csi.ndim != 2:
+        raise ValueError("sanitize_phase_per_packet expects 2D CSI (n_packets, nfft)")
+    
+    n_packets, nfft = csi.shape
+    unwrapped = np.unwrap(np.angle(csi), axis=1)
+    
+    x = np.arange(nfft, dtype=np.float64)
+    x_mean = x.mean()
+    x_centered = x - x_mean
+    denom = np.sum(x_centered ** 2)
+    if denom == 0:
+        return unwrapped - unwrapped.mean(axis=1, keepdims=True)
+    
+    y_mean = unwrapped.mean(axis=1, keepdims=True)
+    y_centered = unwrapped - y_mean
+    slope = (y_centered @ x_centered) / denom
+    intercept = y_mean[:, 0] - slope * x_mean
+    
+    fitted = slope[:, None] * x[None, :] + intercept[:, None]
+    return unwrapped - fitted
+
+
 def remove_dc_component(signal: np.ndarray, window_size: int = 101) -> np.ndarray:
     """Subtract a moving-average baseline to remove DC drift and center the result at zero."""
     x = np.asarray(signal, dtype=np.float64)
@@ -307,15 +344,25 @@ def benchmark_best_k_subcarriers(
     high_hz: float = DEFAULT_HEART_RATE_HIGH_HZ,
     window_size: int = 30,
     hop_size: int = 10,
+    signal_type: str = "amplitude",
 ) -> dict:
-    """Benchmark best-K subcarrier combinations against GT, then return the winner by MAE."""
-    amp = extract_amplitude_signal(csi)
-    if amp.ndim == 1:
-        amp = amp[:, None]
+    """Benchmark best-K subcarrier combinations against GT, then return the winner by MAE.
+    
+    signal_type: "amplitude" or "phase"
+    """
+    if signal_type == "amplitude":
+        signal_matrix = extract_amplitude_signal(csi)
+    elif signal_type == "phase":
+        signal_matrix = sanitize_phase_per_packet(csi)
+    else:
+        raise ValueError(f"Unknown signal_type: {signal_type}")
+    
+    if signal_matrix.ndim == 1:
+        signal_matrix = signal_matrix[:, None]
 
     processed: list[np.ndarray] = []
-    for idx in range(amp.shape[1]):
-        sig = remove_dc_component(amp[:, idx])
+    for idx in range(signal_matrix.shape[1]):
+        sig = remove_dc_component(signal_matrix[:, idx])
         sig = bandpass_heartbeat(sig, fs_hz=fs_hz, low_hz=low_hz, high_hz=high_hz)
         sig = savgol_smooth(sig, window_length=9, polyorder=3)
         processed.append(sig)
@@ -427,6 +474,94 @@ def run_stage_benchmark_cli(argv: Sequence[str] | None = None) -> int:
             f"rmse={metrics['rmse_bpm']:>7.2f} bpm  "
             f"median={metrics['median_error_bpm']:>7.2f} bpm"
         )
+    return 0
+
+
+def run_phase_vs_amplitude_benchmark_cli(argv: Sequence[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Benchmark phase-based vs amplitude-based best-K subcarrier selection against ground-truth BPM.")
+    parser.add_argument("--csi-csv", required=True, help="Complex CSI CSV from live_monitor.py")
+    parser.add_argument("--gt-csv", required=True, help="Heartbeat ground-truth CSV")
+    parser.add_argument("--fs-hz", type=float, default=None, help="Override sample rate (Hz); auto-estimated if omitted")
+    parser.add_argument("--low-hz", type=float, default=DEFAULT_HEART_RATE_LOW_HZ)
+    parser.add_argument("--high-hz", type=float, default=DEFAULT_HEART_RATE_HIGH_HZ)
+    parser.add_argument("--window-size", type=int, default=30)
+    parser.add_argument("--hop-size", type=int, default=10)
+    parser.add_argument("--candidate-ks", type=str, default="1,3,5,10,20")
+    args = parser.parse_args(argv)
+
+    ts, csi = load_csi_csv_matrix(args.csi_csv)
+    gt_ts, gt_bpm = load_ground_truth_csv(args.gt_csv)
+    fs_hz = args.fs_hz if args.fs_hz is not None else (1.0 / np.median(np.diff(ts[np.isfinite(ts)])) if len(ts) > 1 else 0.0)
+    if fs_hz <= 0:
+        raise ValueError("Need a positive sampling rate to benchmark the pipeline")
+
+    candidate_ks = tuple(int(k) for k in args.candidate_ks.split(","))
+
+    print(f"\n{'='*80}")
+    print(f"CSI samples={len(ts)}  fs_hz={fs_hz:.3f}  gt_samples={len(gt_ts)}")
+    print(f"Candidate K values: {candidate_ks}")
+    print(f"{'='*80}\n")
+
+    print(f"{'AMPLITUDE BEST-K BENCHMARK':^80}")
+    print(f"{'-'*80}")
+    amp_bench = benchmark_best_k_subcarriers(
+        csi,
+        gt_ts=gt_ts,
+        gt_bpm=gt_bpm,
+        fs_hz=fs_hz,
+        candidate_ks=candidate_ks,
+        low_hz=args.low_hz,
+        high_hz=args.high_hz,
+        window_size=args.window_size,
+        hop_size=args.hop_size,
+        signal_type="amplitude",
+    )
+
+    for res in amp_bench["results"]:
+        print(
+            f"  K={res['k']:>2}  indices={str(res['selected_indices']):40}  "
+            f"windows={res['window_count']:>4}  mae={res['mae_bpm']:>7.2f} bpm"
+        )
+    print()
+    amp_winner = amp_bench["winner"]
+    print(f"AMPLITUDE WINNER: K={amp_winner['k']}  MAE={amp_winner['mae_bpm']:.2f} bpm\n")
+
+    print(f"{'PHASE BEST-K BENCHMARK':^80}")
+    print(f"{'-'*80}")
+    phase_bench = benchmark_best_k_subcarriers(
+        csi,
+        gt_ts=gt_ts,
+        gt_bpm=gt_bpm,
+        fs_hz=fs_hz,
+        candidate_ks=candidate_ks,
+        low_hz=args.low_hz,
+        high_hz=args.high_hz,
+        window_size=args.window_size,
+        hop_size=args.hop_size,
+        signal_type="phase",
+    )
+
+    for res in phase_bench["results"]:
+        print(
+            f"  K={res['k']:>2}  indices={str(res['selected_indices']):40}  "
+            f"windows={res['window_count']:>4}  mae={res['mae_bpm']:>7.2f} bpm"
+        )
+    print()
+    phase_winner = phase_bench["winner"]
+    print(f"PHASE WINNER: K={phase_winner['k']}  MAE={phase_winner['mae_bpm']:.2f} bpm\n")
+
+    print(f"{'-'*80}")
+    print(f"OVERALL WINNER:")
+    amp_mae = float(amp_winner['mae_bpm'])
+    phase_mae = float(phase_winner['mae_bpm'])
+    if amp_mae <= phase_mae:
+        print(f"  AMPLITUDE (MAE={amp_mae:.2f} bpm) < PHASE (MAE={phase_mae:.2f} bpm)")
+    else:
+        print(f"  PHASE (MAE={phase_mae:.2f} bpm) < AMPLITUDE (MAE={amp_mae:.2f} bpm)")
+    print(f"{'='*80}\n")
+
     return 0
 
 
