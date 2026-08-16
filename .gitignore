@@ -230,3 +230,5 @@ app/results/baseline_ml2/mae_vs_subcarrier.png
 app/results/baseline_ml2/subcarrier_metrics.csv
 app/results/baseline_ml2/summary.txt
 app/results/baseline_ml2/top10_subcarriers.csv
+/fresh/captures
+*.pcap
