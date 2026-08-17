@@ -17,6 +17,24 @@ csi_processing/
     ├── filtered_csi_analysis.png
     └── filtered_problematic_subcarriers.png
 ```
+# Setup
+
+```bash
+# Create virtual enviroment
+python3 -m venv .csi
+
+# Windows: 
+.csi\Scripts\activate
+
+# Linux
+source .csi/bin/activate
+
+# Temp working dir
+cd delta
+
+# Install requirements
+pip install -r requirements.txt
+```
 
 # Usage Examples
 
