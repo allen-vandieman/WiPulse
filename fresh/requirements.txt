@@ -2,3 +2,4 @@ numpy
 scapy
 matplotlib
 pandas
+scipy
