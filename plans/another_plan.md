@@ -54,6 +54,7 @@
    - Segment the data into overlapping windows.
 
 ### Notes
+
 - Ensure both Raspberry Pi devices use consistent filter settings for accurate heart rate monitoring.
 
 # My uncle that is Deep in China recommends
@@ -115,3 +116,38 @@ The signal might be showing *breathing* (0.2-0.4 Hz) rather than *heartbeat* (1.
 1. **Check the phase time series** - heartbeats often cause both amplitude and phase changes
 
 Based on what I see, this capture **looks promising** - the signal is strong, the subject is still, and the filtering is working. The key now is to extract the subtle heartbeat component from the signal.
+
+## Key Recommendations Based on Your Results
+
+### 1. The CSI signal DOES contain heartbeat information
+
+- 52/100 beats matched shows there's a real signal
+
+- The moderate F1-score (0.542) confirms this
+
+### 2. The main issues are:
+
+- Too many false positives (47) → The filter is detecting noise as heartbeats
+
+- Poor heart rate correlation (0.059) → The extracted signal is noisy
+
+### 3. Suggested improvements:
+
+```bash
+# Try narrower bandpass filter (focus on typical heart rates)
+python validate_heartbeat.py --csi .\captures\anusha1-normal\csi_capture_20260812_191830.csv --groundtruth .\captures\anusha1-normal\ground_truth_20260812_191826.csv --heart-low 0.8 --heart-high 1.8
+
+# Try higher order filter for better noise rejection
+python validate_heartbeat.py --csi .\captures\anusha1-normal\csi_capture_20260812_191830.csv --groundtruth .\captures\anusha1-normal\ground_truth_20260812_191826.csv --heart-order 5
+
+# Try wider range if heart rate varies
+python validate_heartbeat.py --csi .\captures\anusha1-normal\csi_capture_20260812_191830.csv --groundtruth .\captures\anusha1-normal\ground_truth_20260812_191826.csv --heart-low 0.7 --heart-high 2.2
+```
+
+### 4. For the best results, you need:
+
+- Multiple captures to find optimal filter parameters
+
+- Different subcarrier selection - try manually selecting subcarriers 29, 23, 24, 30, 46 (the top performers from auto-selection)
+
+- Signal preprocessing - consider removing the DC component and normalizing before peak detection
