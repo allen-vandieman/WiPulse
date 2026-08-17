@@ -1,0 +1,31 @@
+CSI HEARTBEAT VALIDATION REPORT
+============================================================
+
+CSI Data: 7493 packets at 93.5 Hz
+Ground Truth: 100 beats
+
+BEAT DETECTION METRICS:
+----------------------------------------
+Precision:      0.5253
+Recall:         0.5591
+F1-Score:       0.5417
+Accuracy:       0.3714
+True Positives: 52
+False Positives:47
+False Negatives:41
+
+TIMING ACCURACY:
+----------------------------------------
+Mean Abs Error: 99.32 ms
+Std Deviation:  57.63 ms
+Max Error:      192.47 ms
+
+HEART RATE ACCURACY:
+----------------------------------------
+MAE:            36.88 BPM
+RMSE:           45.22 BPM
+Correlation:    0.0588
+Mean Difference:11.30 BPM
+
+CONCLUSION:
+----------------------------------------

@@ -3,3 +3,4 @@ scapy
 matplotlib
 pandas
 scipy
+scikit-learn

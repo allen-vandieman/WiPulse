@@ -124,7 +124,68 @@ done
 --heart-auto-select    Auto-select best subcarriers
 ```
 
-## Usage Examples
+# Summary of alignment
+
+I've created two scripts for your validation workflow:
+
+### 1. validate_heartbeat.py - Complete Validation Pipeline
+
+|Feature|	Description|
+|---|---|
+|Data Loading|	Supports both PCAP and CSV CSI files|
+|Ground Truth Loading|	Reads CSV from heartbeat-giop.py|
+|CSI Heartbeat Extraction|	Uses your bandpass filter (0.8-2.5 Hz)|
+|Timestamp Alignment|	Auto-aligns using cross-correlation|
+|Beat Detection|	Compares CSI peaks vs ground truth beats|
+|Validation Metrics|	Precision, Recall, F1-Score, MAE, RMSE, Correlation|
+|Comprehensive Plots|	8-panel validation dashboard|
+|Detailed Analysis|	Zoomed waveform comparison, error distribution|
+|Report Generation|	Text report with confidence assessment|
+
+### 2. align_beats.py - Quick Alignment Helper
+
+|Feature|	Description|
+|---|---|
+|Fast Alignment|	Finds optimal time offset quickly|
+|Visual Feedback|	Event plot of aligned beats|
+|Match Score|	Shows percentage of matched beats|
+|Interactive|	Plots match score vs offset|
+
+
+## Alignement Usage Examples
+
+```bash
+# Full validation
+python validate_heartbeat.py --csi capture.pcap --groundtruth output/ground_truth_20260817_143022.csv
+
+# Quick alignment check
+python align_beats.py --csi capture.pcap --groundtruth output/ground_truth_20260817_143022.csv
+
+# Custom filter parameters
+python validate_heartbeat.py --csi capture.pcap --groundtruth output/ground_truth_*.csv --heart-low 0.7 --heart-high 2.0 --heart-order 4
+```
+
+### Output Files
+
+|File|	Description|
+|---|---|
+|`validation_results.png`|	Main 8-panel validation dashboard|
+|`validation_detailed.png`|	Zoomed waveform comparison|
+|`validation_report.txt`|	Text report with all metrics|
+|`alignment_results.png`|	Quick alignment visualization|
+
+### Metrics Explained
+
+|Metric|	Description|
+|---|---|
+|Precision|	% of CSI detections that are correct|
+|Recall|	% of actual beats that were detected|
+|F1-Score|	Harmonic mean of precision and recall|
+|MAE|	Mean absolute error in beat timing|
+|RMSE|	Root mean square error of heart rate|
+|Correlation|	Pearson correlation of heart rates|
+
+## Extraction Usage Examples
 
 ```bash
 # Run with default heartbeat extraction
@@ -143,7 +204,7 @@ python main.py capture.pcap --no-heartbeat
 python main.py capture.pcap --heart-auto-select
 ```
 
-## Output Files
+### Output Files
 
 - `heartbeat_analysis.png` - Comprehensive 6-panel analysis
 
@@ -154,6 +215,12 @@ python main.py capture.pcap --heart-auto-select
 - `heartbeat_summary.txt` - Statistics and parameters
 
 # Version Summary
+
+## V0.5
+
+### Key Features Added
+
+1. Align CSI and Groundtruth data
 
 ## V0.4
 
