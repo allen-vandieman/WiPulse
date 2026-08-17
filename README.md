@@ -4,8 +4,10 @@ WiPulse - Contactless Vital Sign Extraction
 
 1. [Setup](/setup/README.md)
 1. [Capture](/setup/CAPTURE.md)
-1. [Extraction App](/app/README.md)
-1. [HR Pipeline](plan.md)
+1. [Extraction App](/delta/README.md)
+1. [HR Pipeline plan](plans/plan.md)
+1. [another Pipeline plan](/plans/another_plan.md)
+1. [rough Pipeline plan](/plans/rough.md)
 
 ## Contents
 
@@ -47,6 +49,8 @@ consumer hardware, offering a less intrusive alternative for monitoring
 vulnerable individuals. 
 
 ## Goals
+
+![Goals](/img/goals.png)
 
 1. Use consumer of the shevle IOT devices
 2. Patch firmware to allow (a) transmission and (b) capture  of raw frames on (c) any channel
