@@ -4,7 +4,7 @@ CSI Heartbeat Validation Script
 Aligns ground truth heartbeat data (from GPIO sensor) with CSI data
 to validate heartbeat detection accuracy.
 
-Usage: python validate_heartbeat.py --csi captures/capture.pcap --groundtruth output/ground_truth_*.csv
+Usage: python validate_heartbeat.py --csi captures/csi_capture_*.csv --groundtruth output/ground_truth_*.csv
 
 Supports:
 - PCAP or CSV CSI data
@@ -25,8 +25,28 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy import signal
 from scipy.signal import find_peaks
-from scipy.stats import pearsonr
-from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+# Try importing sklearn, fallback if not available
+try:
+    from scipy.stats import pearsonr
+    from sklearn.metrics import mean_absolute_error, mean_squared_error
+    HAS_SKLEARN = True
+except ImportError:
+    HAS_SKLEARN = False
+    print("Warning: scikit-learn not installed. Some metrics will be unavailable.")
+    print("Install with: pip install scikit-learn")
+    
+    # Fallback implementations
+    def mean_absolute_error(y_true, y_pred):
+        return np.mean(np.abs(np.array(y_true) - np.array(y_pred)))
+    
+    def mean_squared_error(y_true, y_pred):
+        return np.mean((np.array(y_true) - np.array(y_pred)) ** 2)
+    
+    def pearsonr(x, y):
+        x = np.array(x)
+        y = np.array(y)
+        return np.corrcoef(x, y)[0, 1], 0
 
 # Import CSI modules
 from read_csv_csi import CSIDataLoader
@@ -206,15 +226,17 @@ class HeartbeatValidator:
             if idx < n_samples and np.abs(self.csi_timestamps[idx] - gt_time) < 0.1:
                 self.groundtruth_signal[idx] = 1.0
         
-        # Alternatively, use the ground truth beat times as is
         print(f"  Created ground truth signal with {np.sum(self.groundtruth_signal > 0)} beat markers")
         
         # Also create a filtered version for comparison
         # Convolve with a small Gaussian to create continuous signal
         kernel_width = int(0.05 * sampling_rate)  # 50ms
-        kernel = np.exp(-np.linspace(-3, 3, kernel_width*2+1)**2 / 2)
-        kernel = kernel / np.sum(kernel)
-        self.groundtruth_signal_smooth = np.convolve(self.groundtruth_signal, kernel, mode='same')
+        if kernel_width > 0:
+            kernel = np.exp(-np.linspace(-3, 3, kernel_width*2+1)**2 / 2)
+            kernel = kernel / np.sum(kernel)
+            self.groundtruth_signal_smooth = np.convolve(self.groundtruth_signal, kernel, mode='same')
+        else:
+            self.groundtruth_signal_smooth = self.groundtruth_signal
         
         # Detect peaks in ground truth for comparison
         self.groundtruth_peaks = find_peaks(
@@ -293,23 +315,25 @@ class HeartbeatValidator:
         if len(self.csi_heart_rates) > 0 and hasattr(self, 'groundtruth_heart_rates') and len(self.groundtruth_heart_rates) > 0:
             # Align heart rate sequences
             min_len = min(len(self.csi_heart_rates), len(self.groundtruth_heart_rates))
-            csi_hr = self.csi_heart_rates[:min_len]
-            gt_hr = self.groundtruth_heart_rates[:min_len]
-            
-            self.metrics['heart_rate_mae'] = mean_absolute_error(gt_hr, csi_hr)
-            self.metrics['heart_rate_rmse'] = np.sqrt(mean_squared_error(gt_hr, csi_hr))
-            self.metrics['heart_rate_correlation'] = pearsonr(csi_hr, gt_hr)[0]
-            self.metrics['heart_rate_mean_diff'] = np.mean(csi_hr - gt_hr)
-            
-            print(f"  HR MAE: {self.metrics['heart_rate_mae']:.2f} BPM")
-            print(f"  HR RMSE: {self.metrics['heart_rate_rmse']:.2f} BPM")
-            print(f"  HR Correlation: {self.metrics['heart_rate_correlation']:.3f}")
+            if min_len > 0:
+                csi_hr = self.csi_heart_rates[:min_len]
+                gt_hr = self.groundtruth_heart_rates[:min_len]
+                
+                self.metrics['heart_rate_mae'] = mean_absolute_error(gt_hr, csi_hr)
+                self.metrics['heart_rate_rmse'] = np.sqrt(mean_squared_error(gt_hr, csi_hr))
+                corr, _ = pearsonr(csi_hr, gt_hr)
+                self.metrics['heart_rate_correlation'] = corr
+                self.metrics['heart_rate_mean_diff'] = np.mean(csi_hr - gt_hr)
+                
+                print(f"  HR MAE: {self.metrics['heart_rate_mae']:.2f} BPM")
+                print(f"  HR RMSE: {self.metrics['heart_rate_rmse']:.2f} BPM")
+                print(f"  HR Correlation: {self.metrics['heart_rate_correlation']:.3f}")
         
         # 3. Overall accuracy
         self.metrics['beat_detection_accuracy'] = (self.metrics.get('true_positives', 0) / 
                                                    (self.metrics.get('true_positives', 0) + 
                                                     self.metrics.get('false_positives', 0) + 
-                                                    self.metrics.get('false_negatives', 0)))
+                                                    self.metrics.get('false_negatives', 0)) if (self.metrics.get('true_positives', 0) + self.metrics.get('false_positives', 0) + self.metrics.get('false_negatives', 0)) > 0 else 0)
         
         # Print summary
         self._print_metrics_summary()
@@ -406,9 +430,10 @@ class HeartbeatValidator:
                        c='green', alpha=0.6, s=20)
             
             # Plot diagonal
-            min_t = min([p['gt_time'] for p in matched] + [p['csi_time'] for p in matched])
-            max_t = max([p['gt_time'] for p in matched] + [p['csi_time'] for p in matched])
-            ax2.plot([min_t, max_t], [min_t, max_t], 'k--', alpha=0.5)
+            if matched:
+                min_t = min(min([p['gt_time'] for p in matched]), min([p['csi_time'] for p in matched]))
+                max_t = max(max([p['gt_time'] for p in matched]), max([p['csi_time'] for p in matched]))
+                ax2.plot([min_t, max_t], [min_t, max_t], 'k--', alpha=0.5)
             
             ax2.set_xlabel('Ground Truth Beat Time (s)')
             ax2.set_ylabel('CSI Detected Beat Time (s)')
@@ -419,53 +444,56 @@ class HeartbeatValidator:
         ax3 = plt.subplot(4, 2, 3)
         if hasattr(self, 'csi_heart_rates') and hasattr(self, 'groundtruth_heart_rates'):
             min_len = min(len(self.csi_heart_rates), len(self.groundtruth_heart_rates))
-            csi_hr = self.csi_heart_rates[:min_len]
-            gt_hr = self.groundtruth_heart_rates[:min_len]
-            
-            ax3.plot(csi_hr, 'b-', label='CSI HR', linewidth=1.5)
-            ax3.plot(gt_hr, 'r-', label='Ground Truth HR', linewidth=1.5)
-            ax3.set_xlabel('Beat Number')
-            ax3.set_ylabel('Heart Rate (BPM)')
-            ax3.set_title('Heart Rate Comparison')
-            ax3.legend()
-            ax3.grid(True, alpha=0.3)
+            if min_len > 0:
+                csi_hr = self.csi_heart_rates[:min_len]
+                gt_hr = self.groundtruth_heart_rates[:min_len]
+                
+                ax3.plot(csi_hr, 'b-', label='CSI HR', linewidth=1.5)
+                ax3.plot(gt_hr, 'r-', label='Ground Truth HR', linewidth=1.5)
+                ax3.set_xlabel('Beat Number')
+                ax3.set_ylabel('Heart Rate (BPM)')
+                ax3.set_title('Heart Rate Comparison')
+                ax3.legend()
+                ax3.grid(True, alpha=0.3)
         
         # 4. Heart rate scatter
         ax4 = plt.subplot(4, 2, 4)
         if hasattr(self, 'csi_heart_rates') and hasattr(self, 'groundtruth_heart_rates'):
             min_len = min(len(self.csi_heart_rates), len(self.groundtruth_heart_rates))
-            csi_hr = self.csi_heart_rates[:min_len]
-            gt_hr = self.groundtruth_heart_rates[:min_len]
-            
-            ax4.scatter(gt_hr, csi_hr, alpha=0.6)
-            
-            # Plot diagonal
-            min_hr = min(min(gt_hr), min(csi_hr)) - 5
-            max_hr = max(max(gt_hr), max(csi_hr)) + 5
-            ax4.plot([min_hr, max_hr], [min_hr, max_hr], 'k--', alpha=0.5)
-            
-            ax4.set_xlabel('Ground Truth HR (BPM)')
-            ax4.set_ylabel('CSI HR (BPM)')
-            ax4.set_title('Heart Rate Correlation')
-            ax4.grid(True, alpha=0.3)
-            
-            # Add correlation text
-            if 'heart_rate_correlation' in self.metrics:
-                ax4.text(0.05, 0.95, f"r = {self.metrics['heart_rate_correlation']:.3f}", 
-                        transform=ax4.transAxes, fontsize=12, verticalalignment='top')
+            if min_len > 0:
+                csi_hr = self.csi_heart_rates[:min_len]
+                gt_hr = self.groundtruth_heart_rates[:min_len]
+                
+                ax4.scatter(gt_hr, csi_hr, alpha=0.6)
+                
+                # Plot diagonal
+                min_hr = min(min(gt_hr), min(csi_hr)) - 5
+                max_hr = max(max(gt_hr), max(csi_hr)) + 5
+                ax4.plot([min_hr, max_hr], [min_hr, max_hr], 'k--', alpha=0.5)
+                
+                ax4.set_xlabel('Ground Truth HR (BPM)')
+                ax4.set_ylabel('CSI HR (BPM)')
+                ax4.set_title('Heart Rate Correlation')
+                ax4.grid(True, alpha=0.3)
+                
+                # Add correlation text
+                if 'heart_rate_correlation' in self.metrics:
+                    ax4.text(0.05, 0.95, f"r = {self.metrics['heart_rate_correlation']:.3f}", 
+                            transform=ax4.transAxes, fontsize=12, verticalalignment='top')
         
         # 5. Error distribution
         ax5 = plt.subplot(4, 2, 5)
         if 'matched_pairs' in self.metrics and self.metrics['matched_pairs']:
             errors = [p['error'] * 1000 for p in self.metrics['matched_pairs']]  # Convert to ms
-            ax5.hist(errors, bins=30, alpha=0.7, color='purple')
-            ax5.axvline(x=np.mean(errors), color='r', linestyle='--', 
-                       label=f'Mean: {np.mean(errors):.1f} ms')
-            ax5.set_xlabel('Timing Error (ms)')
-            ax5.set_ylabel('Frequency')
-            ax5.set_title('Beat Timing Error Distribution')
-            ax5.legend()
-            ax5.grid(True, alpha=0.3)
+            if errors:
+                ax5.hist(errors, bins=min(30, len(errors)), alpha=0.7, color='purple')
+                ax5.axvline(x=np.mean(errors), color='r', linestyle='--', 
+                           label=f'Mean: {np.mean(errors):.1f} ms')
+                ax5.set_xlabel('Timing Error (ms)')
+                ax5.set_ylabel('Frequency')
+                ax5.set_title('Beat Timing Error Distribution')
+                ax5.legend()
+                ax5.grid(True, alpha=0.3)
         
         # 6. Confusion matrix
         ax6 = plt.subplot(4, 2, 6)
@@ -509,24 +537,25 @@ class HeartbeatValidator:
             
             # Plot only up to 5 Hz
             freq_mask = f <= 5
-            im = ax7.imshow(
-                10 * np.log10(Sxx[freq_mask, :] + 1e-10),
-                aspect='auto',
-                origin='lower',
-                extent=[t[0], t[-1], f[freq_mask][0], f[freq_mask][-1]],
-                cmap='viridis'
-            )
-            ax7.set_xlabel('Time (seconds)')
-            ax7.set_ylabel('Frequency (Hz)')
-            ax7.set_title('CSI Spectrogram (0-5 Hz)')
-            plt.colorbar(im, ax=ax7, label='Power (dB)')
-            
-            # Overlay ground truth beats
-            if hasattr(self, 'groundtruth_peaks'):
-                gt_times = self.csi_timestamps[self.groundtruth_peaks]
-                for gt_time in gt_times:
-                    if gt_time < t[-1] and gt_time > t[0]:
-                        ax7.axvline(x=gt_time, color='red', alpha=0.3, linewidth=0.5)
+            if np.any(freq_mask):
+                im = ax7.imshow(
+                    10 * np.log10(Sxx[freq_mask, :] + 1e-10),
+                    aspect='auto',
+                    origin='lower',
+                    extent=[t[0], t[-1], f[freq_mask][0], f[freq_mask][-1]],
+                    cmap='viridis'
+                )
+                ax7.set_xlabel('Time (seconds)')
+                ax7.set_ylabel('Frequency (Hz)')
+                ax7.set_title('CSI Spectrogram (0-5 Hz)')
+                plt.colorbar(im, ax=ax7, label='Power (dB)')
+                
+                # Overlay ground truth beats
+                if hasattr(self, 'groundtruth_peaks'):
+                    gt_times = self.csi_timestamps[self.groundtruth_peaks]
+                    for gt_time in gt_times:
+                        if gt_time < t[-1] and gt_time > t[0]:
+                            ax7.axvline(x=gt_time, color='red', alpha=0.3, linewidth=0.5)
         
         # 8. Performance metrics text
         ax8 = plt.subplot(4, 2, 8)
@@ -580,39 +609,40 @@ class HeartbeatValidator:
             start_idx = 0
             end_idx = len(self.csi_timestamps)
         
-        time_axis = self.csi_timestamps[start_idx:end_idx]
-        csi_segment = self.csi_heartbeat[start_idx:end_idx]
-        
-        # Normalize
-        if np.std(csi_segment) > 0:
-            csi_segment = (csi_segment - np.mean(csi_segment)) / np.std(csi_segment)
-        
-        axes[0].plot(time_axis, csi_segment, 'b-', alpha=0.7, linewidth=1, label='CSI Signal')
-        
-        # Ground truth
-        if hasattr(self, 'groundtruth_signal_smooth'):
-            gt_segment = self.groundtruth_signal_smooth[start_idx:end_idx]
-            gt_segment = gt_segment * 2 - 1
-            axes[0].plot(time_axis, gt_segment, 'r-', alpha=0.7, linewidth=1, label='Ground Truth')
-        
-        # Mark beats
-        csi_peaks_in_view = self.csi_peaks[(self.csi_peaks >= start_idx) & (self.csi_peaks < end_idx)]
-        axes[0].scatter(self.csi_timestamps[csi_peaks_in_view], 
-                       np.ones(len(csi_peaks_in_view)), 
-                       c='blue', marker='^', s=80, label='CSI Beats', zorder=5)
-        
-        if hasattr(self, 'groundtruth_peaks'):
-            gt_peaks_in_view = self.groundtruth_peaks[(self.groundtruth_peaks >= start_idx) & (self.groundtruth_peaks < end_idx)]
-            axes[0].scatter(self.csi_timestamps[gt_peaks_in_view], 
-                           -np.ones(len(gt_peaks_in_view)), 
-                           c='red', marker='v', s=80, label='GT Beats', zorder=5)
-        
-        axes[0].set_xlabel('Time (seconds)')
-        axes[0].set_ylabel('Normalized Amplitude')
-        axes[0].set_title('Detailed Waveform Comparison (30s segment)')
-        axes[0].legend(loc='upper right')
-        axes[0].grid(True, alpha=0.3)
-        axes[0].set_ylim(-2, 2)
+        if end_idx > start_idx:
+            time_axis = self.csi_timestamps[start_idx:end_idx]
+            csi_segment = self.csi_heartbeat[start_idx:end_idx]
+            
+            # Normalize
+            if np.std(csi_segment) > 0:
+                csi_segment = (csi_segment - np.mean(csi_segment)) / np.std(csi_segment)
+            
+            axes[0].plot(time_axis, csi_segment, 'b-', alpha=0.7, linewidth=1, label='CSI Signal')
+            
+            # Ground truth
+            if hasattr(self, 'groundtruth_signal_smooth'):
+                gt_segment = self.groundtruth_signal_smooth[start_idx:end_idx]
+                gt_segment = gt_segment * 2 - 1
+                axes[0].plot(time_axis, gt_segment, 'r-', alpha=0.7, linewidth=1, label='Ground Truth')
+            
+            # Mark beats
+            csi_peaks_in_view = self.csi_peaks[(self.csi_peaks >= start_idx) & (self.csi_peaks < end_idx)]
+            axes[0].scatter(self.csi_timestamps[csi_peaks_in_view], 
+                           np.ones(len(csi_peaks_in_view)), 
+                           c='blue', marker='^', s=80, label='CSI Beats', zorder=5)
+            
+            if hasattr(self, 'groundtruth_peaks'):
+                gt_peaks_in_view = self.groundtruth_peaks[(self.groundtruth_peaks >= start_idx) & (self.groundtruth_peaks < end_idx)]
+                axes[0].scatter(self.csi_timestamps[gt_peaks_in_view], 
+                               -np.ones(len(gt_peaks_in_view)), 
+                               c='red', marker='v', s=80, label='GT Beats', zorder=5)
+            
+            axes[0].set_xlabel('Time (seconds)')
+            axes[0].set_ylabel('Normalized Amplitude')
+            axes[0].set_title('Detailed Waveform Comparison (30s segment)')
+            axes[0].legend(loc='upper right')
+            axes[0].grid(True, alpha=0.3)
+            axes[0].set_ylim(-2, 2)
         
         # 2. Error over time
         if 'matched_pairs' in self.metrics and self.metrics['matched_pairs']:
