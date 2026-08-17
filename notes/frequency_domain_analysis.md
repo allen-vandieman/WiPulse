@@ -16,11 +16,8 @@ This document explains the concepts and motivation behind frequency domain analy
 
 For each OFDM subcarrier, CSI provides a complex value:
 
-<center>
-<h4>
-H(f<sub>k</sub>) = I<sub>k</sub> + jQ<sub>k</sub>
-</h4>
-</center>
+
+<h4 align="center">H(f<sub>k</sub>) = I<sub>k</sub> + jQ<sub>k</sub></h4>
 
 Where:
 
@@ -34,9 +31,7 @@ Each complex value describes how the wireless channel affects that particular su
 
 The amplitude (or magnitude) is calculated as:
 
-\[
-|H(f_k)| = \sqrt{I_k^2 + Q_k^2}
-\]
+<h4 align="center">|H(f<sub>k</sub>)| = $\sqrt{I<sub>k</sub><sup>2</sup> + Q<sub>k</sub><sup>2</sup>}$</h4>
 
 Amplitude represents how much the channel attenuates or amplifies the signal at a specific frequency.
 
@@ -51,9 +46,9 @@ Amplitude represents how much the channel attenuates or amplifies the signal at 
 
 The phase is calculated as:
 
-\[
-\angle H(f_k) = \tan^{-1}\left(\frac{Q_k}{I_k}\right)
-\]
+<h4 align="center">
+angle H(f<sub>k</sub>) = tan<sup>-1</sup>$\frac{Q<sub>k</sub>}{I<sub>k</sub>}$
+</h4>
 
 Phase represents the phase shift introduced by the propagation channel.
 
@@ -71,9 +66,9 @@ Phase contains information about:
 
 A CSI vector for a single packet looks like:
 
-\[
-[H(f_1), H(f_2), H(f_3), ... , H(f_N)]
-\]
+<h4 align="center">
+[H(f<sub>1</sub>), H(f<sub>2</sub>), H(f<sub>3</sub>), ... , H(f<sub>N</sub>)]
+</h4>
 
 where each element corresponds to a different OFDM subcarrier frequency.
 
@@ -93,9 +88,9 @@ There are two different types of frequency-domain analysis commonly performed on
 
 For a single packet, we can examine:
 
-\[
+<h4 align="center">
 H(f)
-\]
+</h4>
 
 and observe how amplitude or phase changes across subcarrier frequencies.
 
@@ -123,15 +118,15 @@ Suppose CSI packets are collected continuously.
 
 For a fixed subcarrier:
 
-\[
-H(f_k,t)
-\]
+<h4 align="center">
+H(f<sub>k</sub>,t)
+</h4>
 
 we can extract the amplitude:
 
-\[
-A(t)=|H(f_k,t)|
-\]
+<h4 align="center">
+A(t)=|H(f<sub>k</sub>,t)|
+</h4>
 
 This produces a time series.
 
@@ -186,15 +181,15 @@ These frequencies become visible when CSI is analyzed over time.
 
 From a CSI amplitude time series:
 
-\[
+<h4 align="center">
 A(t)
-\]
+</h4>
 
 we compute:
 
-\[
+<h4 align="center">
 FFT(A(t))
-\]
+</h4>
 
 The FFT decomposes the signal into sinusoidal frequency components.
 
@@ -233,9 +228,9 @@ PSD describes how a signal's power is distributed across frequencies.
 
 Mathematically:
 
-\[
+<h4 align="center">
 PSD(f)
-\]
+</h4>
 
 indicates how much energy exists at each frequency component.
 
@@ -259,9 +254,9 @@ These concepts are closely related but not identical.
 
 FFT provides complex-valued frequency components:
 
-\[
+<h4 align="center">
 X(f)
-\]
+</h4>
 
 The FFT retains:
 
@@ -276,9 +271,9 @@ information.
 
 PSD represents the energy or power of those frequency components:
 
-\[
-PSD(f) \propto |X(f)|^2
-\]
+<h4 align="center">
+|X(f)|<sup>2</sup>
+</h4>
 
 Typically PSD is normalized and smoothed using estimation methods such as Welch's method.
 
@@ -314,17 +309,13 @@ Peak at 0.25 Hz
 
 we immediately know the dominant variation occurs at:
 
-\[
-0.25\,Hz
-\]
+[0.25 Hz]
 
 which corresponds to:
 
-\[
-0.25 \times 60 = 15
-\]
+[0.25 x 60 = 15 ]
 
-breaths per minute.
+15 breaths per minute.
 
 PSD transforms noisy time-domain data into a more interpretable representation.
 
@@ -355,10 +346,10 @@ The dominant frequency is:
 Breathing rate:
 
 \[
-0.3 \times 60 = 18
+0.3 x 60 = 18
 \]
 
-breaths per minute.
+18 breaths per minute.
 
 Using PSD makes respiration frequency easy to identify even when the raw CSI signal appears noisy.
 
@@ -406,9 +397,7 @@ More motion produces stronger and wider spectral content.
 
 Although CSI is already a frequency-domain representation, it can be transformed into the delay domain using an Inverse FFT (IFFT):
 
-\[
-h(\tau)=IFFT(H(f))
-\]
+h($\tau$)=IFFT(H(f))
 
 This produces an approximation of the channel impulse response.
 
