@@ -6,7 +6,6 @@
 
 import numpy as np
 from scipy import signal
-from scipy.ndimage import median_filter
 
 
 class FilterConfig:
@@ -25,8 +24,16 @@ class FilterConfig:
         # Zero Detection
         self.zero_threshold = 1e-6   # Threshold to consider a value as zero
         
+        # DC Detection
+        self.dc_threshold = 0.1      # Coefficient of variation threshold for DC detection
+        
         # Interpolation Settings
         self.interpolate_problematic = True
+        
+        # Filter Application Options
+        self.apply_notch = True      # Apply notch filter
+        self.apply_hampel = True     # Apply Hampel filter
+        self.aggressive_filtering = False  # If True, apply to all subcarriers
 
 
 class CSIFilter:
@@ -38,11 +45,14 @@ class CSIFilter:
         self.dc_mask = None
         self.zero_mask = None
         
-    def detect_dc_subcarriers(self, csi_data, threshold=0.1):
+    def detect_dc_subcarriers(self, csi_data, threshold=None):
         """
         Detect DC subcarriers (those with very low amplitude variation)
         Returns boolean mask of DC subcarriers
         """
+        if threshold is None:
+            threshold = self.config.dc_threshold
+            
         magnitudes = np.abs(csi_data)
         
         # Calculate mean magnitude per subcarrier
@@ -57,7 +67,7 @@ class CSIFilter:
         cv[mask] = var_mag[mask] / mean_mag[mask]
         
         # DC subcarriers have very low variation and low mean
-        dc_mask = (mean_mag < np.percentile(mean_mag, 5)) | (cv < threshold)
+        dc_mask = (mean_mag < np.percentile(mean_mag, 2)) | (cv < threshold)
         
         self.dc_mask = dc_mask
         return dc_mask
@@ -91,6 +101,9 @@ class CSIFilter:
         """
         Apply notch filter to remove specific frequency components
         """
+        if not self.config.apply_notch:
+            return csi_data
+            
         if freq is None:
             freq = self.config.notch_freq
         if Q is None:
@@ -111,11 +124,28 @@ class CSIFilter:
         
         # Apply filter to each subcarrier
         filtered_data = np.zeros_like(csi_data)
-        for sc in range(csi_data.shape[1]):
+        
+        # Determine which subcarriers to filter
+        if self.config.aggressive_filtering:
+            # Filter all subcarriers
+            sc_range = range(csi_data.shape[1])
+        else:
+            # Only filter problematic subcarriers
+            if self.problematic_mask is None:
+                self.detect_problematic_subcarriers(csi_data)
+            sc_range = np.where(self.problematic_mask)[0]
+        
+        for sc in sc_range:
             # Filter real and imaginary parts separately
             filtered_data[:, sc] = signal.filtfilt(
                 b, a, csi_data[:, sc], axis=0
             )
+        
+        # Copy non-filtered subcarriers
+        if not self.config.aggressive_filtering:
+            for sc in range(csi_data.shape[1]):
+                if sc not in sc_range:
+                    filtered_data[:, sc] = csi_data[:, sc]
         
         return filtered_data
     
@@ -123,6 +153,9 @@ class CSIFilter:
         """
         Apply Hampel filter to remove outliers
         """
+        if not self.config.apply_hampel:
+            return csi_data
+            
         if window_size is None:
             window_size = self.config.hampel_window_size
         if threshold is None:
@@ -134,7 +167,17 @@ class CSIFilter:
         half_window = window_size // 2
         filtered_data = csi_data.copy()
         
-        for sc in range(csi_data.shape[1]):
+        # Determine which subcarriers to filter
+        if self.config.aggressive_filtering:
+            # Filter all subcarriers
+            sc_range = range(csi_data.shape[1])
+        else:
+            # Only filter problematic subcarriers
+            if self.problematic_mask is None:
+                self.detect_problematic_subcarriers(csi_data)
+            sc_range = np.where(self.problematic_mask)[0]
+        
+        for sc in sc_range:
             # Process real and imaginary parts separately
             for component_idx in [0, 1]:  # 0 = real, 1 = imag
                 component = csi_data[:, sc].real if component_idx == 0 else csi_data[:, sc].imag
@@ -165,6 +208,9 @@ class CSIFilter:
         """
         Interpolate problematic subcarriers from neighboring ones
         """
+        if not self.config.interpolate_problematic:
+            return csi_data
+            
         if problematic_mask is None:
             problematic_mask = self.problematic_mask
             
@@ -174,34 +220,35 @@ class CSIFilter:
         filtered_data = csi_data.copy()
         n_subcarriers = csi_data.shape[1]
         
-        for sc in range(n_subcarriers):
-            if problematic_mask[sc]:
-                # Interpolate from neighboring subcarriers
-                left_sc = sc - 1
-                right_sc = sc + 1
+        problematic_indices = np.where(problematic_mask)[0]
+        
+        for sc in problematic_indices:
+            # Interpolate from neighboring subcarriers
+            left_sc = sc - 1
+            right_sc = sc + 1
+            
+            while left_sc >= 0 and problematic_mask[left_sc]:
+                left_sc -= 1
+            while right_sc < n_subcarriers and problematic_mask[right_sc]:
+                right_sc += 1
+            
+            if left_sc >= 0 and right_sc < n_subcarriers:
+                # Interpolate between neighbors
+                weight_left = 1 - (sc - left_sc) / (right_sc - left_sc)
+                weight_right = 1 - (right_sc - sc) / (right_sc - left_sc)
                 
-                while left_sc >= 0 and problematic_mask[left_sc]:
-                    left_sc -= 1
-                while right_sc < n_subcarriers and problematic_mask[right_sc]:
-                    right_sc += 1
-                
-                if left_sc >= 0 and right_sc < n_subcarriers:
-                    # Interpolate between neighbors
-                    weight_left = 1 - (sc - left_sc) / (right_sc - left_sc)
-                    weight_right = 1 - (right_sc - sc) / (right_sc - left_sc)
-                    
-                    # Interpolate both real and imaginary parts
-                    filtered_data[:, sc] = (
-                        weight_left * filtered_data[:, left_sc] + 
-                        weight_right * filtered_data[:, right_sc]
-                    )
-                elif left_sc >= 0:
-                    filtered_data[:, sc] = filtered_data[:, left_sc]
-                elif right_sc < n_subcarriers:
-                    filtered_data[:, sc] = filtered_data[:, right_sc]
-                else:
-                    # If no neighbors, use mean of all subcarriers
-                    filtered_data[:, sc] = np.mean(filtered_data, axis=1)
+                # Interpolate both real and imaginary parts
+                filtered_data[:, sc] = (
+                    weight_left * filtered_data[:, left_sc] + 
+                    weight_right * filtered_data[:, right_sc]
+                )
+            elif left_sc >= 0:
+                filtered_data[:, sc] = filtered_data[:, left_sc]
+            elif right_sc < n_subcarriers:
+                filtered_data[:, sc] = filtered_data[:, right_sc]
+            else:
+                # If no neighbors, use mean of all subcarriers
+                filtered_data[:, sc] = np.mean(filtered_data, axis=1)
         
         return filtered_data
     
@@ -226,14 +273,17 @@ class CSIFilter:
             print(f"    Permanent zeros: {np.sum(zero_mask)}")
             print(f"    Total problematic: {np.sum(self.problematic_mask)}")
         
-        # Step 2: Apply notch filter
-        if verbose:
-            print("  Applying notch filter...")
-        filtered_data = self.apply_notch_filter(csi_data)
+        # Create copy for filtered data
+        filtered_data = csi_data.copy()
         
-        # Step 3: Apply Hampel filter
+        # Step 2: Apply notch filter to problematic subcarriers
         if verbose:
-            print("  Applying Hampel filter...")
+            print("  Applying notch filter (only to problematic subcarriers)...")
+        filtered_data = self.apply_notch_filter(filtered_data)
+        
+        # Step 3: Apply Hampel filter to problematic subcarriers
+        if verbose:
+            print("  Applying Hampel filter (only to problematic subcarriers)...")
         filtered_data = self.apply_hampel_filter(filtered_data)
         
         # Step 4: Interpolate problematic subcarriers
@@ -242,9 +292,15 @@ class CSIFilter:
                 print("  Interpolating problematic subcarriers...")
             filtered_data = self.interpolate_problematic_subcarriers(filtered_data)
         
+        # Count modifications (only for problematic subcarriers)
         if verbose:
-            modified_count = np.sum(np.abs(filtered_data - csi_data) > 0.01)
-            print(f"  Modified elements: {modified_count}")
+            problematic_indices = np.where(self.problematic_mask)[0]
+            if len(problematic_indices) > 0:
+                modified_count = np.sum(np.abs(filtered_data[:, problematic_indices] - 
+                                               csi_data[:, problematic_indices]) > 0.01)
+                print(f"  Modified elements in problematic subcarriers: {modified_count}")
+            else:
+                print("  No problematic subcarriers to modify")
             print("="*60)
         
         return filtered_data

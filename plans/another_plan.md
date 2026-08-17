@@ -55,3 +55,63 @@
 
 ### Notes
 - Ensure both Raspberry Pi devices use consistent filter settings for accurate heart rate monitoring.
+
+# My uncle that is Deep in China recommends
+
+## What's Missing: Frequency Analysis
+
+To confirm a heartbeat, I need to see **frequency domain analysis**. A heartbeat at ~60-90 BPM would appear as a peak at **1.0-1.5 Hz**.
+
+Can you provide:
+
+1. FFT or Power Spectral Density (PSD) of the filtered CSI for selected subcarriers?
+
+1. Frequency domain comparison between baseline and heartbeat attempts?
+
+1. Peak detection showing the dominant frequency in the signal?
+
+## Recommendations
+
+### 1. Extract the Heartbeat Component
+
+The heartbeat signal is very subtle (~1-2% of total signal). You need to:
+
+- **Bandpass filter** between 0.8-2.5 Hz
+
+- **Average across subcarriers** that show the strongest response
+
+- Apply **moving average** to smooth the signal
+
+### 2. Check Specific Subcarriers
+
+The subcarriers showing the **most variation** in the filtered time series are likely the ones carrying the heartbeat. 
+
+Try:
+
+- **Subcarriers 0, 63, and 123** (high original magnitude)
+
+- **Middle subcarriers** (100-150) are often most sensitive
+
+### 3. Breathing vs Heartbeat
+
+The signal might be showing *breathing* (0.2-0.4 Hz) rather than *heartbeat* (1.0-1.5 Hz). To differentiate:
+
+- Look for **two distinct frequencies** in the signal
+
+- Breathing causes **larger amplitude** variations
+
+- Heartbeat causes **smaller, faster** variations
+
+### 4. Run a Longer Capture
+
+80 seconds at 93.5 Hz gives ~7,500 samples - this is good for frequency analysis. For even better heart rate estimation, 2-3 minutes would be ideal.
+
+## Next Steps
+
+1. Can you share the **frequency domain analysis (FFT/PSD)** for this capture?
+
+1. **Compare the filtered time series** of subcarrier 0, 63, and 123 to see which shows the most rhythmic pattern
+
+1. **Check the phase time series** - heartbeats often cause both amplitude and phase changes
+
+Based on what I see, this capture **looks promising** - the signal is strong, the subject is still, and the filtering is working. The key now is to extract the subtle heartbeat component from the signal.
