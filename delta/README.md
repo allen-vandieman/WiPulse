@@ -1,5 +1,6 @@
 # Directory Structure
 
+```
 csi_processing/
 ├── __init__.py
 ├── read_csv_csi.py      # Data loading module
@@ -15,6 +16,7 @@ csi_processing/
     ├── filter_comparison.png
     ├── filtered_csi_analysis.png
     └── filtered_problematic_subcarriers.png
+```
 
 # Usage Examples
 
@@ -39,14 +41,14 @@ python main.py csi_capture_*.csv --analysis-only
 
 This modular architecture provides:
 
-Separation of Concerns: Each module has a single responsibility
+1. Separation of Concerns: Each module has a single responsibility
 
-Reusability: Each module can be used independently
+1. Reusability: Each module can be used independently
 
-Extensibility: Easy to add new filters, plot types, or data sources
+1. Extensibility: Easy to add new filters, plot types, or data sources
 
-Configurability: Filter parameters can be customized via command line
+1. Configurability: Filter parameters can be customized via command line
 
-Flexibility: Run full pipeline or individual steps
+1. Flexibility: Run full pipeline or individual steps
 
-Maintainability: Clean, well-organized code structure
+1. Maintainability: Clean, well-organized code structure
