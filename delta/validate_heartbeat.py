@@ -5,13 +5,6 @@ Aligns ground truth heartbeat data (from GPIO sensor) with CSI data
 to validate heartbeat detection accuracy.
 
 Usage: python validate_heartbeat.py --csi captures/csi_capture_*.csv --groundtruth output/ground_truth_*.csv
-
-Supports:
-- PCAP or CSV CSI data
-- Ground truth CSV from heartbeat-giop.py
-- Automatic timestamp alignment
-- Comprehensive comparison plots
-- Statistical validation metrics
 """
 
 import sys
@@ -19,7 +12,6 @@ import argparse
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from datetime import datetime
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -46,6 +38,8 @@ except ImportError:
     def pearsonr(x, y):
         x = np.array(x)
         y = np.array(y)
+        if len(x) < 2 or len(y) < 2:
+            return 0, 1
         return np.corrcoef(x, y)[0, 1], 0
 
 # Import CSI modules
@@ -172,7 +166,6 @@ class HeartbeatValidator:
             csi_timestamps = np.arange(self.csi_data.shape[0]) / self.metadata['rate']
         
         # Align by matching first beat
-        # Assume first ground truth beat corresponds to first CSI beat
         if len(self.csi_peaks) > 0 and len(gt_timestamps) > 0:
             # Find optimal offset by cross-correlating beat times
             csi_beat_times = csi_timestamps[self.csi_peaks]
@@ -229,7 +222,6 @@ class HeartbeatValidator:
         print(f"  Created ground truth signal with {np.sum(self.groundtruth_signal > 0)} beat markers")
         
         # Also create a filtered version for comparison
-        # Convolve with a small Gaussian to create continuous signal
         kernel_width = int(0.05 * sampling_rate)  # 50ms
         if kernel_width > 0:
             kernel = np.exp(-np.linspace(-3, 3, kernel_width*2+1)**2 / 2)
@@ -321,7 +313,10 @@ class HeartbeatValidator:
                 
                 self.metrics['heart_rate_mae'] = mean_absolute_error(gt_hr, csi_hr)
                 self.metrics['heart_rate_rmse'] = np.sqrt(mean_squared_error(gt_hr, csi_hr))
-                corr, _ = pearsonr(csi_hr, gt_hr)
+                if len(csi_hr) > 1 and len(gt_hr) > 1:
+                    corr, _ = pearsonr(csi_hr, gt_hr)
+                else:
+                    corr = 0
                 self.metrics['heart_rate_correlation'] = corr
                 self.metrics['heart_rate_mean_diff'] = np.mean(csi_hr - gt_hr)
                 
@@ -330,10 +325,10 @@ class HeartbeatValidator:
                 print(f"  HR Correlation: {self.metrics['heart_rate_correlation']:.3f}")
         
         # 3. Overall accuracy
-        self.metrics['beat_detection_accuracy'] = (self.metrics.get('true_positives', 0) / 
-                                                   (self.metrics.get('true_positives', 0) + 
-                                                    self.metrics.get('false_positives', 0) + 
-                                                    self.metrics.get('false_negatives', 0)) if (self.metrics.get('true_positives', 0) + self.metrics.get('false_positives', 0) + self.metrics.get('false_negatives', 0)) > 0 else 0)
+        total = (self.metrics.get('true_positives', 0) + 
+                self.metrics.get('false_positives', 0) + 
+                self.metrics.get('false_negatives', 0))
+        self.metrics['beat_detection_accuracy'] = (self.metrics.get('true_positives', 0) / total if total > 0 else 0)
         
         # Print summary
         self._print_metrics_summary()
@@ -371,13 +366,13 @@ class HeartbeatValidator:
         print("\nConfidence Assessment:")
         f1 = self.metrics.get('f1_score', 0)
         if f1 >= 0.9:
-            print("  ✅ EXCELLENT: CSI heartbeat detection strongly matches ground truth")
+            print("  [EXCELLENT] CSI heartbeat detection strongly matches ground truth")
         elif f1 >= 0.7:
-            print("  ✅ GOOD: CSI heartbeat detection matches ground truth well")
+            print("  [GOOD] CSI heartbeat detection matches ground truth well")
         elif f1 >= 0.5:
-            print("  ⚠️ MODERATE: CSI heartbeat detection partially matches ground truth")
+            print("  [MODERATE] CSI heartbeat detection partially matches ground truth")
         else:
-            print("  ❌ POOR: CSI heartbeat detection does not match ground truth")
+            print("  [POOR] CSI heartbeat detection does not match ground truth")
     
     def create_comparison_plots(self, output_dir='validation'):
         """Create comprehensive comparison plots"""
@@ -425,12 +420,12 @@ class HeartbeatValidator:
         ax2 = plt.subplot(4, 2, 2)
         if 'matched_pairs' in self.metrics:
             matched = self.metrics['matched_pairs']
-            ax2.scatter([p['gt_time'] for p in matched], 
-                       [p['csi_time'] for p in matched], 
-                       c='green', alpha=0.6, s=20)
-            
-            # Plot diagonal
             if matched:
+                ax2.scatter([p['gt_time'] for p in matched], 
+                           [p['csi_time'] for p in matched], 
+                           c='green', alpha=0.6, s=20)
+                
+                # Plot diagonal
                 min_t = min(min([p['gt_time'] for p in matched]), min([p['csi_time'] for p in matched]))
                 max_t = max(max([p['gt_time'] for p in matched]), max([p['csi_time'] for p in matched]))
                 ax2.plot([min_t, max_t], [min_t, max_t], 'k--', alpha=0.5)
@@ -565,19 +560,19 @@ class HeartbeatValidator:
         PERFORMANCE METRICS
         
         Beat Detection:
-        • Precision:  {self.metrics.get('precision', 0):.3f}
-        • Recall:     {self.metrics.get('recall', 0):.3f}
-        • F1-Score:   {self.metrics.get('f1_score', 0):.3f}
-        • Accuracy:   {self.metrics.get('beat_detection_accuracy', 0):.3f}
+        * Precision:  {self.metrics.get('precision', 0):.3f}
+        * Recall:     {self.metrics.get('recall', 0):.3f}
+        * F1-Score:   {self.metrics.get('f1_score', 0):.3f}
+        * Accuracy:   {self.metrics.get('beat_detection_accuracy', 0):.3f}
         
         Timing:
-        • Mean Error: {self.metrics.get('mean_abs_error', 0)*1000:.1f} ms
-        • Std Error:  {self.metrics.get('std_error', 0)*1000:.1f} ms
+        * Mean Error: {self.metrics.get('mean_abs_error', 0)*1000:.1f} ms
+        * Std Error:  {self.metrics.get('std_error', 0)*1000:.1f} ms
         
         Heart Rate:
-        • MAE:        {self.metrics.get('heart_rate_mae', 0):.2f} BPM
-        • RMSE:       {self.metrics.get('heart_rate_rmse', 0):.2f} BPM
-        • Correlation:{self.metrics.get('heart_rate_correlation', 0):.3f}
+        * MAE:        {self.metrics.get('heart_rate_mae', 0):.2f} BPM
+        * RMSE:       {self.metrics.get('heart_rate_rmse', 0):.2f} BPM
+        * Correlation:{self.metrics.get('heart_rate_correlation', 0):.3f}
         """
         
         ax8.text(0.1, 0.9, metrics_text, transform=ax8.transAxes, fontsize=11,
@@ -655,7 +650,7 @@ class HeartbeatValidator:
             axes[1].axhline(y=np.mean(errors), color='r', linestyle='--', 
                            label=f'Mean: {np.mean(errors):.1f} ms')
             axes[1].axhline(y=np.mean(errors) + np.std(errors), color='orange', linestyle=':', 
-                           label=f'±1σ: {np.std(errors):.1f} ms')
+                           label=f'+/-1s: {np.std(errors):.1f} ms')
             axes[1].axhline(y=np.mean(errors) - np.std(errors), color='orange', linestyle=':')
             
             axes[1].set_xlabel('Time (seconds)')
@@ -676,7 +671,7 @@ class HeartbeatValidator:
         """Save validation results to a text file"""
         Path(output_dir).mkdir(exist_ok=True)
         
-        with open(f'{output_dir}/validation_report.txt', 'w') as f:
+        with open(f'{output_dir}/validation_report.txt', 'w', encoding='utf-8') as f:
             f.write("CSI HEARTBEAT VALIDATION REPORT\n")
             f.write("="*60 + "\n\n")
             
@@ -711,16 +706,16 @@ class HeartbeatValidator:
             f.write("-"*40 + "\n")
             f1 = self.metrics.get('f1_score', 0)
             if f1 >= 0.9:
-                f.write("✅ EXCELLENT: CSI heartbeat detection strongly matches ground truth\n")
+                f.write("EXCELLENT: CSI heartbeat detection strongly matches ground truth\n")
                 f.write("The system can reliably detect heartbeats from CSI data.\n")
             elif f1 >= 0.7:
-                f.write("✅ GOOD: CSI heartbeat detection matches ground truth well\n")
+                f.write("GOOD: CSI heartbeat detection matches ground truth well\n")
                 f.write("The system shows good performance with minor improvements possible.\n")
             elif f1 >= 0.5:
-                f.write("⚠️ MODERATE: CSI heartbeat detection partially matches ground truth\n")
+                f.write("MODERATE: CSI heartbeat detection partially matches ground truth\n")
                 f.write("Some optimization of filter parameters may be needed.\n")
             else:
-                f.write("❌ POOR: CSI heartbeat detection does not match ground truth\n")
+                f.write("POOR: CSI heartbeat detection does not match ground truth\n")
                 f.write("Please check sensor placement, filter settings, and alignment.\n")
             
             print(f"  Saved validation report to '{output_dir}/validation_report.txt'")

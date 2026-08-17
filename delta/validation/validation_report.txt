@@ -29,3 +29,5 @@ Mean Difference:11.30 BPM
 
 CONCLUSION:
 ----------------------------------------
+MODERATE: CSI heartbeat detection partially matches ground truth
+Some optimization of filter parameters may be needed.
