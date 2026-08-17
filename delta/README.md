@@ -40,20 +40,20 @@ pip install -r requirements.txt
 # Usage Examples
 
 ```bash
-# Full pipeline (load, filter, plot)
-python run_pipeline.py csi_capture_20240101_120000.csv
+# Run with default heartbeat extraction
+python main.py capture.pcap
 
-# Analysis only (no filtering)
-python run_pipeline.py csi_capture_*.csv --analysis-only
+# Adjust bandpass range for different heart rates
+python main.py capture.pcap --heart-low 0.7 --heart-high 2.0
 
-# Custom output directory
-python run_pipeline.py csi_capture_*.csv --output-dir my_results
+# Higher order filter for sharper cutoff
+python main.py capture.pcap --heart-order 4
 
-# Custom filter parameters
-python run_pipeline.py csi_capture_*.csv --notch-q 40.0 --hampel-window 15
+# Disable heartbeat extraction
+python main.py capture.pcap --no-heartbeat
 
-# Using main.py directly
-python main.py csi_capture_*.csv --analysis-only
+# Auto-select best subcarriers
+python main.py capture.pcap --heart-auto-select
 ```
 
 ## 1. Process CSV File
@@ -67,6 +67,7 @@ python run_pipeline.py captures/anusha1-normal/csi_capture_20260812_191830.csv
 ```bash
 python run_pipeline.py captures/capture.pcap
 ```
+
 ## 3. Analysis Only (No Filtering)
 
 ```bash
@@ -99,7 +100,102 @@ for file in captures/*.pcap; do
 done
 ```
 
-# Summary
+# Summary of New Features
+
+## Heartbeat Extraction Module (heartbeat_extraction.py)
+
+| Feature |	Description |
+|---|---|
+|Bandpass Filter |	Third-order Butterworth, adjustable (0.8-2.5 Hz default)|
+|Auto-subcarrier Selection |	Automatically picks best subcarriers for heartbeat detection|
+|Heart Rate Estimation |	FFT-based frequency analysis with confidence scoring|
+|Peak Detection |	Identifies individual heartbeats in the waveform|
+|Spectrogram |	Time-frequency visualization for heart rate over time|
+|Sliding Window Analysis |	Tracks heart rate changes over the capture duration|
+|Comprehensive Plots |	6-panel analysis dashboard with summary statistics |
+
+## New CLI Arguments
+
+```text
+--heart-low FLOAT      Lower cutoff (Hz), default: 0.8
+--heart-high FLOAT     Upper cutoff (Hz), default: 2.5
+--heart-order INT      Filter order, default: 3
+--no-heartbeat         Disable heartbeat extraction
+--heart-auto-select    Auto-select best subcarriers
+```
+
+## Usage Examples
+
+```bash
+# Run with default heartbeat extraction
+python main.py capture.pcap
+
+# Adjust bandpass range for different heart rates
+python main.py capture.pcap --heart-low 0.7 --heart-high 2.0
+
+# Higher order filter for sharper cutoff
+python main.py capture.pcap --heart-order 4
+
+# Disable heartbeat extraction
+python main.py capture.pcap --no-heartbeat
+
+# Auto-select best subcarriers
+python main.py capture.pcap --heart-auto-select
+```
+
+## Output Files
+
+- `heartbeat_analysis.png` - Comprehensive 6-panel analysis
+
+- `subcarrier_comparison.png` - Comparison across subcarriers
+
+- `heartbeat_signal.txt` - Extracted heartbeat waveform
+
+- `heartbeat_summary.txt` - Statistics and parameters
+
+# Version Summary
+
+## V0.4
+
+### Key Features Added
+
+1. Third-order Butterworth bandpass filter (0.8-2.5 Hz, adjustable)
+
+1. Subcarrier averaging for optimal signal-to-noise ratio
+
+1. Frequency domain analysis for heart rate estimation
+
+1. Integration with your existing pipeline
+
+## V0.3
+
+### Key Features Added
+
+1. Automatic File Type Detection: Detects CSV vs PCAP based on file extension
+
+1. Unified Interface: Same commands work for both file types
+
+1. PCAP Metadata Extraction: Extracts sequence, core, NSS, chanspec, chipver
+
+1. Strongest Subcarrier Display: Shows 15 strongest subcarriers like the original read_pcap.py
+
+1. Flexible Output: PCAP data can be saved as CSV after filtering
+
+1. Backward Compatibility: Maintains original read_pcap.py function
+
+## V0.2
+
+### Key Changes Made:
+
+1. Fixed Import: Added import numpy as np to main.py
+
+1. Less Aggressive Filtering: By default, filters are only applied to problematic subcarriers (DC and permanent zeros), not all 256 subcarriers
+
+1. Added Configuration Option: aggressive_filtering flag controls whether to apply filters to all or only problematic subcarriers
+
+1. Better Statistics: Shows modifications only for problematic subcarriers
+
+1. Added dc_threshold Parameter: Allows tuning of DC detection sensitivity
 
 ## V0.1
 
@@ -116,33 +212,3 @@ This modular architecture provides:
 1. Flexibility: Run full pipeline or individual steps
 
 1. Maintainability: Clean, well-organized code structure
-
-# Key Changes Made:
-
-## V0.2
-
-1. Fixed Import: Added import numpy as np to main.py
-
-1. Less Aggressive Filtering: By default, filters are only applied to problematic subcarriers (DC and permanent zeros), not all 256 subcarriers
-
-1. Added Configuration Option: aggressive_filtering flag controls whether to apply filters to all or only problematic subcarriers
-
-1. Better Statistics: Shows modifications only for problematic subcarriers
-
-1. Added dc_threshold Parameter: Allows tuning of DC detection sensitivity
-
-# Key Features Added
-
-## V0.3
-
-1. Automatic File Type Detection: Detects CSV vs PCAP based on file extension
-
-1. Unified Interface: Same commands work for both file types
-
-1. PCAP Metadata Extraction: Extracts sequence, core, NSS, chanspec, chipver
-
-1. Strongest Subcarrier Display: Shows 15 strongest subcarriers like the original read_pcap.py
-
-1. Flexible Output: PCAP data can be saved as CSV after filtering
-
-1. Backward Compatibility: Maintains original read_pcap.py function

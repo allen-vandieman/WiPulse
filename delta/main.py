@@ -11,6 +11,7 @@
 # 1. Data loading (CSV or PCAP)
 # 2. Filtering (filters.py)
 # 3. Plotting (plot_csv.py)
+# 4. Heartbeat Extraction (heartbeat_extraction.py) - NEW!
 # ----------------------------------------------------------------------
 
 import sys
@@ -23,6 +24,9 @@ from read_csv_csi import CSIDataLoader
 from read_pcap import PCAPDataLoader, extract_csi_info
 from filters import CSIFilter, FilterConfig
 from plot_csv import CSIPlotter, create_all_plots
+
+# Import heartbeat extraction
+from heartbeat_extraction import HeartbeatExtractor, HeartbeatConfig, HeartbeatFilter
 
 
 class CSIProcessor:
@@ -37,6 +41,7 @@ class CSIProcessor:
         self.filtered_data = None
         self.problematic_mask = None
         self.input_type = None
+        self.heartbeat_result = None
         
     def detect_file_type(self, file_path):
         """Detect if file is CSV or PCAP based on extension"""
@@ -89,14 +94,61 @@ class CSIProcessor:
         
         return self.filtered_data, self.problematic_mask
     
+    def extract_heartbeat(self, low_freq=0.8, high_freq=2.5, order=3, 
+                         auto_select=True, output_dir='heartbeat'):
+        """
+        Extract heartbeat signal from filtered CSI data
+        
+        Args:
+            low_freq: Lower cutoff frequency (Hz) for bandpass filter
+            high_freq: Upper cutoff frequency (Hz) for bandpass filter  
+            order: Butterworth filter order
+            auto_select: Auto-select best subcarriers for heartbeat extraction
+            output_dir: Output directory for heartbeat analysis plots
+        """
+        if self.filtered_data is None:
+            # If no filtered data, use original
+            print("\nWARNING: No filtered data available. Using original CSI data.")
+            data_to_use = self.csi_data
+        else:
+            data_to_use = self.filtered_data
+        
+        print("\n" + "="*60)
+        print("STEP 3: Heartbeat Extraction")
+        print("="*60)
+        
+        # Configure heartbeat extraction
+        config = HeartbeatConfig()
+        config.bandpass_low = low_freq
+        config.bandpass_high = high_freq
+        config.filter_order = order
+        config.use_all_subcarriers = not auto_select
+        
+        # Update sampling rate from metadata
+        if self.metadata and 'rate' in self.metadata:
+            config.sampling_rate = self.metadata['rate']
+        else:
+            config.sampling_rate = 100.0  # Default
+        
+        # Create extractor and run analysis
+        extractor = HeartbeatExtractor(config)
+        self.heartbeat_result = extractor.run_full_analysis(
+            data_to_use, 
+            self.metadata, 
+            output_dir
+        )
+        
+        return self.heartbeat_result
+    
     def create_plots(self, output_dir='graphs', prefix='', 
-                    create_comparison=True, create_filtered=True):
+                    create_comparison=True, create_filtered=True,
+                    create_heartbeat=True):
         """Generate all plots"""
         if self.csi_data is None:
             raise ValueError("No data loaded. Call load_data() first.")
         
         print("\n" + "="*60)
-        print("STEP 3: Generating Plots")
+        print("STEP 4: Generating Plots")
         print("="*60)
         
         self.plotter = CSIPlotter(output_dir)
@@ -173,13 +225,20 @@ class CSIProcessor:
             return output_file
     
     def run_full_pipeline(self, file_path, output_dir='graphs', 
-                         filter_config=None, save_filtered=True):
-        """Run the complete processing pipeline"""
+                         filter_config=None, save_filtered=True,
+                         extract_heartbeat=True, 
+                         heart_low=0.8, heart_high=2.5, heart_order=3):
+        """Run the complete processing pipeline with heartbeat extraction"""
         # Load data
         self.load_data(file_path)
         
         # Apply filters
         self.apply_filters(filter_config)
+        
+        # Extract heartbeat (new!)
+        if extract_heartbeat:
+            self.extract_heartbeat(heart_low, heart_high, heart_order, 
+                                  output_dir=output_dir)
         
         # Generate plots
         self.create_plots(output_dir)
@@ -198,6 +257,10 @@ class CSIProcessor:
             else:
                 filtered_file = Path(file_path).stem + '_filtered.csv'
             print(f"Filtered data: {filtered_file}")
+        
+        if extract_heartbeat and self.heartbeat_result:
+            print(f"Heart rate: {self.heartbeat_result['heart_rate']:.1f} BPM")
+            print(f"Heartbeat analysis: {output_dir}/heartbeat_analysis.png")
     
     def run_analysis_only(self, file_path, output_dir='graphs'):
         """Run only analysis (load + plot), no filtering"""
@@ -225,6 +288,12 @@ Examples:
   
   # Custom filter parameters
   python main.py captures/capture.pcap --notch-q 40.0 --hampel-window 15
+  
+  # Heartbeat extraction parameters (NEW!)
+  python main.py captures/capture.pcap --heart-low 0.7 --heart-high 2.0 --heart-order 4
+  
+  # Disable heartbeat extraction
+  python main.py captures/capture.pcap --no-heartbeat
         """
     )
     
@@ -245,6 +314,18 @@ Examples:
                        help='Threshold for Hampel filter (default: 3.0)')
     parser.add_argument('--dc-threshold', type=float, default=0.1,
                        help='Threshold for DC subcarrier detection (default: 0.1)')
+    
+    # New heartbeat extraction arguments
+    parser.add_argument('--no-heartbeat', action='store_true',
+                       help='Disable heartbeat extraction')
+    parser.add_argument('--heart-low', type=float, default=0.8,
+                       help='Lower cutoff frequency for heartbeat filter (Hz, default: 0.8)')
+    parser.add_argument('--heart-high', type=float, default=2.5,
+                       help='Upper cutoff frequency for heartbeat filter (Hz, default: 2.5)')
+    parser.add_argument('--heart-order', type=int, default=3,
+                       help='Butterworth filter order (default: 3)')
+    parser.add_argument('--heart-auto-select', action='store_true',
+                       help='Auto-select best subcarriers for heartbeat extraction')
     
     args = parser.parse_args()
     
@@ -270,7 +351,7 @@ Examples:
             print(f"\nAnalysis complete. Plots saved to '{args.output_dir}/'")
             
         else:
-            # Full pipeline with filtering
+            # Full pipeline with filtering and heartbeat extraction
             # Configure filters
             config = FilterConfig()
             config.notch_Q = args.notch_q
@@ -283,7 +364,11 @@ Examples:
                 args.file_path, 
                 args.output_dir,
                 filter_config=config,
-                save_filtered=not args.no_save_filtered
+                save_filtered=not args.no_save_filtered,
+                extract_heartbeat=not args.no_heartbeat,
+                heart_low=args.heart_low,
+                heart_high=args.heart_high,
+                heart_order=args.heart_order
             )
     
     except Exception as e:
