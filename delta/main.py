@@ -73,10 +73,6 @@ class CSIProcessor:
         print(f"Duration: {self.metadata['duration']:.3f} seconds")
         print(f"Rate: {self.metadata['rate']:.2f} Hz")
         print(f"File type: {self.input_type.upper()}")
-        if self.metadata.get('n_gaps', 0) > 0:
-            print(f"WARNING: {self.metadata['n_gaps']} sequence gap(s) detected "
-                  f"(~{self.metadata['n_dropped_estimate']} packet(s) possibly dropped) "
-                  f"-- rate/timing may be less reliable")
         
         return self.csi_data, self.metadata
     
@@ -139,8 +135,7 @@ class CSIProcessor:
         self.heartbeat_result = extractor.run_full_analysis(
             data_to_use, 
             self.metadata, 
-            output_dir,
-            real_timestamps=self.metadata.get('timestamps') if self.metadata else None
+            output_dir
         )
         
         return self.heartbeat_result
