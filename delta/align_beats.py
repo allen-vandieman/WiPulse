@@ -32,6 +32,9 @@ def quick_align(csi_path, groundtruth_path):
         csi_data, metadata = loader.load()
     
     print(f"  CSI: {metadata['n_packets']} packets, {metadata['rate']:.1f} Hz")
+    if metadata.get('n_gaps', 0) > 0:
+        print(f"  WARNING: {metadata['n_gaps']} sequence gap(s) detected "
+              f"(~{metadata['n_dropped_estimate']} packet(s) possibly dropped)")
     
     print("\nLoading ground truth...")
     gt_df = pd.read_csv(groundtruth_path)
@@ -50,9 +53,17 @@ def quick_align(csi_path, groundtruth_path):
     heartbeat = extractor.apply_bandpass_filter(filtered_csi)
     peaks = extractor.detect_peaks(heartbeat)['peaks']
     
-    # Get beat times
-    csi_beat_times = np.arange(len(heartbeat)) / metadata['rate']
-    csi_beat_times = csi_beat_times[peaks]
+    # Get beat times. Prefer real per-packet capture timestamps over the
+    # uniform arange(len)/rate assumption, same as validate_heartbeat.py.
+    real_ts = metadata.get('timestamps')
+    if real_ts is not None and len(real_ts) == len(heartbeat):
+        csi_time_axis = np.asarray(real_ts, dtype=np.float64)
+        print("  Using real per-packet capture timestamps for CSI time axis")
+    else:
+        csi_time_axis = np.arange(len(heartbeat)) / metadata['rate']
+        print("  WARNING: real timestamps unavailable/length-mismatched; "
+              "falling back to uniform-rate time axis")
+    csi_beat_times = csi_time_axis[peaks]
     
     # Get ground truth times
     if 'ts' in gt_df.columns:

@@ -19,6 +19,47 @@ class PCAPConfig:
     HOFFSET = 15          # Offset for CSI data in packet
     BW = 80               # Bandwidth in MHz
     NFFT = int(BW * 3.2)  # 256 for 80 MHz
+    SEQ_BITS = 16          # width of the sequence-number field (2 bytes, little-endian)
+
+
+def detect_sequence_gaps(sequences, seq_bits=16):
+    """
+    Detect gaps in a (possibly wrapping) packet sequence-number stream.
+
+    Treats the sequence counter as wrapping at 2**seq_bits (e.g. a 16-bit
+    counter wraps 65535 -> 0). A "healthy" step between consecutive packets
+    is +1 (mod 2**seq_bits); anything else means one or more packets were
+    dropped between them.
+
+    Returns a dict:
+        n_gaps:            number of places where a gap was detected
+        n_dropped_estimate: estimated total number of missing packets
+        gap_indices:        indices (into `sequences`) just *before* each gap
+    """
+    sequences = np.asarray(sequences, dtype=np.int64)
+    if len(sequences) < 2:
+        return {'n_gaps': 0, 'n_dropped_estimate': 0, 'gap_indices': []}
+
+    # Sequence numbers of -1 mean "couldn't be parsed for this packet";
+    # skip them rather than treating them as real drops.
+    valid = sequences >= 0
+    if np.sum(valid) < 2:
+        return {'n_gaps': 0, 'n_dropped_estimate': 0, 'gap_indices': []}
+
+    seq_mod = 1 << seq_bits
+    diffs = np.diff(sequences)
+    # Normalize wraparound: a healthy step is +1 (mod seq_mod)
+    wrapped_diffs = ((diffs - 1) % seq_mod) + 1  # 1 = no drop, K = (K-1) dropped
+    gap_mask = wrapped_diffs > 1
+
+    gap_indices = np.where(gap_mask)[0].tolist()
+    n_dropped = int(np.sum(wrapped_diffs[gap_mask] - 1))
+
+    return {
+        'n_gaps': int(np.sum(gap_mask)),
+        'n_dropped_estimate': n_dropped,
+        'gap_indices': gap_indices,
+    }
 
 
 class PCAPDataLoader:
@@ -29,6 +70,8 @@ class PCAPDataLoader:
         self.config = config if config else PCAPConfig()
         self.csi_data = None
         self.metadata = None
+        self.timestamps = None   # real per-packet capture timestamps (relative, seconds)
+        self.sequences = None    # per-packet sequence numbers
         
     def load(self):
         """Load PCAP and extract CSI data"""
@@ -42,6 +85,8 @@ class PCAPDataLoader:
         
         # Extract CSI data
         all_complex = []
+        all_timestamps = []   # real per-packet capture time (scapy pkt.time, epoch seconds)
+        all_sequences = []    # per-packet sequence number (for gap detection)
         metadata = {}
         valid_packets = 0
         
@@ -63,12 +108,17 @@ class PCAPDataLoader:
             H = words[self.config.HOFFSET:self.config.HOFFSET + self.config.NFFT]
             hout = H.view(np.int16)
             
-            # Extract metadata from first packet
+            # Extract per-packet sequence number (needed for gap detection on
+            # every packet, not just the first)
+            payload8 = words.view(np.uint8)
+            seq = int.from_bytes(payload8[52:54], "little") if len(payload8) >= 60 else None
+            
+            # Extract remaining metadata from first packet only (these fields
+            # are expected to be constant for a single capture)
             if not metadata:
-                payload8 = words.view(np.uint8)
                 if len(payload8) >= 60:
-                    metadata['sequence'] = int.from_bytes(payload8[52:54], "little")
                     core_ss = int.from_bytes(payload8[54:56], "little")
+                    metadata['sequence'] = seq
                     metadata['core'] = core_ss & 0x7
                     metadata['nss'] = (core_ss >> 3) & 0x7
                     metadata['chanspec'] = int.from_bytes(payload8[56:58], "little")
@@ -91,27 +141,60 @@ class PCAPDataLoader:
             )
             
             all_complex.append(complex_csi)
+            all_timestamps.append(float(pkt.time))  # scapy's real capture timestamp
+            all_sequences.append(seq if seq is not None else -1)
             valid_packets += 1
         
         # Convert to numpy array
         self.csi_data = np.array(all_complex)
+        timestamps = np.array(all_timestamps, dtype=np.float64)
+        sequences = np.array(all_sequences, dtype=np.int64)
         
         # Add more metadata
         if self.csi_data.shape[0] > 0:
             metadata['n_packets'] = self.csi_data.shape[0]
             metadata['n_subcarriers'] = self.csi_data.shape[1]
-            metadata['rate'] = valid_packets / 1.0  # Will be refined if timestamps available
             
-            # Estimate duration and rate (if timestamps not available)
-            # PCAP doesn't have timestamps in the same way, so we estimate from packet count
-            # Assuming ~100 packets per second (typical for CSI)
-            metadata['duration'] = valid_packets / 93.5  # Approximate for 80MHz
-            metadata['rate'] = valid_packets / metadata['duration']
+            # --- Real capture rate, measured from actual packet timestamps ---
+            duration = float(timestamps[-1] - timestamps[0])
+            if duration > 0 and valid_packets > 1:
+                metadata['duration'] = duration
+                # N packets span N-1 intervals
+                metadata['rate'] = (valid_packets - 1) / duration
+            else:
+                print("  WARNING: could not compute rate from packet timestamps "
+                      "(duration <= 0 or a single packet); falling back to "
+                      "93.5 Hz assumption")
+                metadata['duration'] = valid_packets / 93.5
+                metadata['rate'] = (valid_packets / metadata['duration']
+                                     if metadata['duration'] > 0 else 0.0)
+            
+            metadata['first_ts'] = float(timestamps[0])
+            metadata['last_ts'] = float(timestamps[-1])
+            
+            # Real per-packet timestamps, zeroed relative to the first packet.
+            # Downstream code (validate_heartbeat.py, align_beats.py,
+            # heartbeat_extraction.py) can use this directly instead of
+            # assuming a perfectly uniform arange(len)/rate grid.
+            metadata['timestamps'] = timestamps - timestamps[0]
+            
+            # --- Dropped-packet detection via sequence-number gaps ---
+            gap_info = detect_sequence_gaps(sequences, seq_bits=self.config.SEQ_BITS)
+            metadata.update(gap_info)
+            
+            self.timestamps = metadata['timestamps']
+            self.sequences = sequences
         else:
             metadata['n_packets'] = 0
             metadata['n_subcarriers'] = 0
             metadata['duration'] = 0
             metadata['rate'] = 0
+            metadata['timestamps'] = np.array([])
+            metadata['n_gaps'] = 0
+            metadata['n_dropped_estimate'] = 0
+            metadata['gap_indices'] = []
+            self.timestamps = np.array([])
+            self.sequences = np.array([])
         
         self.metadata = metadata
         
@@ -120,6 +203,12 @@ class PCAPDataLoader:
         
         print(f"\nExtracted {valid_packets} valid CSI packets")
         print(f"CSI data shape: {self.csi_data.shape}")
+        print(f"Measured capture rate: {metadata['rate']:.2f} Hz "
+              f"over {metadata['duration']:.2f} s (real timestamps)")
+        if metadata.get('n_gaps', 0) > 0:
+            print(f"  WARNING: detected {metadata['n_gaps']} sequence gap(s), "
+                  f"~{metadata['n_dropped_estimate']} packet(s) possibly dropped "
+                  f"-- rate/timing may be less reliable")
         
         # Print min/max values (like MATLAB read_pcap)
         hout_flat = self.csi_data.view(np.float64).reshape(-1)
@@ -180,6 +269,10 @@ if __name__ == "__main__":
         print(f"Core: {metadata.get('core', 'N/A')}")
         print(f"NSS: {metadata.get('nss', 'N/A')}")
         print(f"Chanspec: 0x{metadata.get('chanspec', 0):04X}")
+        print(f"Measured rate: {metadata['rate']:.2f} Hz")
+        if metadata.get('n_gaps', 0) > 0:
+            print(f"Sequence gaps: {metadata['n_gaps']} "
+                  f"(~{metadata['n_dropped_estimate']} packets possibly dropped)")
     except Exception as e:
         print(f"Error: {e}")
         sys.exit(1)

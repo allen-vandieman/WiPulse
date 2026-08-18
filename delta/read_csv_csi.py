@@ -11,6 +11,38 @@ import pandas as pd
 from pathlib import Path
 
 
+def detect_sequence_gaps(sequences, seq_bits=16):
+    """
+    Detect gaps in a (possibly wrapping) packet sequence-number stream.
+
+    Mirrors the logic in read_pcap.py so both loaders report dropped
+    packets the same way. Treats the counter as wrapping at 2**seq_bits;
+    a healthy step between consecutive packets is +1 (mod 2**seq_bits).
+
+    Returns a dict:
+        n_gaps:             number of places where a gap was detected
+        n_dropped_estimate: estimated total number of missing packets
+        gap_indices:        indices (into `sequences`) just *before* each gap
+    """
+    sequences = np.asarray(sequences, dtype=np.int64)
+    if len(sequences) < 2:
+        return {'n_gaps': 0, 'n_dropped_estimate': 0, 'gap_indices': []}
+
+    seq_mod = 1 << seq_bits
+    diffs = np.diff(sequences)
+    wrapped_diffs = ((diffs - 1) % seq_mod) + 1  # 1 = no drop, K = (K-1) dropped
+    gap_mask = wrapped_diffs > 1
+
+    gap_indices = np.where(gap_mask)[0].tolist()
+    n_dropped = int(np.sum(wrapped_diffs[gap_mask] - 1))
+
+    return {
+        'n_gaps': int(np.sum(gap_mask)),
+        'n_dropped_estimate': n_dropped,
+        'gap_indices': gap_indices,
+    }
+
+
 class CSIDataLoader:
     """Load and parse CSI data from CSV files"""
     
@@ -19,6 +51,8 @@ class CSIDataLoader:
         self.df = None
         self.csi_data = None
         self.metadata = None
+        self.timestamps = None  # real per-packet timestamps (relative, seconds)
+        self.sequences = None
         
     def load(self):
         """Load CSV and extract CSI data"""
@@ -56,23 +90,49 @@ class CSIDataLoader:
         
     def _extract_metadata(self):
         """Extract metadata from DataFrame"""
-        timestamps = self.df['ts'].values
+        timestamps = self.df['ts'].values.astype(np.float64)
         seq_nums = self.df['seq_num'].values
         cores = self.df['core'].values
         spatial_streams = self.df['spatial_stream'].values
         
+        n_packets = len(self.df)
+        duration = float(timestamps[-1] - timestamps[0])
+        
+        if duration > 0 and n_packets > 1:
+            # N packets span N-1 intervals
+            rate = (n_packets - 1) / duration
+        else:
+            print("  WARNING: could not compute rate from timestamps "
+                  "(duration <= 0 or a single row); rate set to 0.0")
+            rate = 0.0
+        
+        gap_info = detect_sequence_gaps(seq_nums)
+        
         self.metadata = {
             'first_ts': timestamps[0],
             'last_ts': timestamps[-1],
-            'duration': timestamps[-1] - timestamps[0],
-            'n_packets': len(self.df),
+            'duration': duration,
+            'n_packets': n_packets,
             'n_subcarriers': self.n_subcarriers,
             'seq_first': seq_nums[0],
             'seq_last': seq_nums[-1],
             'core': cores[0] if len(np.unique(cores)) == 1 else np.unique(cores).tolist(),
             'spatial_stream': spatial_streams[0] if len(np.unique(spatial_streams)) == 1 else np.unique(spatial_streams).tolist(),
-            'rate': len(self.df) / (timestamps[-1] - timestamps[0]),
+            'rate': rate,
+            # Real per-packet timestamps, zeroed relative to the first row.
+            # Same convention as read_pcap.py, so downstream code can treat
+            # both loaders identically.
+            'timestamps': timestamps - timestamps[0],
         }
+        self.metadata.update(gap_info)
+        
+        self.timestamps = self.metadata['timestamps']
+        self.sequences = seq_nums
+        
+        if gap_info['n_gaps'] > 0:
+            print(f"  WARNING: detected {gap_info['n_gaps']} sequence gap(s), "
+                  f"~{gap_info['n_dropped_estimate']} packet(s) possibly dropped "
+                  f"-- rate/timing may be less reliable")
     
     def save_filtered_csv(self, filtered_data, output_file=None):
         """Save filtered CSI data back to CSV"""
@@ -110,6 +170,9 @@ if __name__ == "__main__":
         print(f"with {metadata['n_subcarriers']} subcarriers each")
         print(f"Duration: {metadata['duration']:.3f} seconds")
         print(f"Rate: {metadata['rate']:.2f} Hz")
+        if metadata.get('n_gaps', 0) > 0:
+            print(f"Sequence gaps: {metadata['n_gaps']} "
+                  f"(~{metadata['n_dropped_estimate']} packets possibly dropped)")
     except Exception as e:
         print(f"Error: {e}")
         sys.exit(1)

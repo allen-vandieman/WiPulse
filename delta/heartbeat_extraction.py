@@ -48,6 +48,7 @@ class HeartbeatExtractor:
         self.spectrogram = None
         self.frequencies = None
         self.times = None
+        self.real_timestamps = None  # real per-packet timestamps, if provided
         
     def design_bandpass_filter(self):
         """Design a bandpass Butterworth filter for heartbeat extraction"""
@@ -255,14 +256,36 @@ class HeartbeatExtractor:
             'avg_heart_rate': avg_hr
         }
     
-    def run_full_analysis(self, csi_data, metadata=None, output_dir='heartbeat_analysis'):
-        """Run complete heartbeat extraction and analysis"""
+    def run_full_analysis(self, csi_data, metadata=None, output_dir='heartbeat_analysis',
+                           real_timestamps=None):
+        """Run complete heartbeat extraction and analysis
+
+        real_timestamps: optional array of real per-packet capture timestamps
+            (relative, seconds), as produced by read_pcap.py/read_csv_csi.py's
+            metadata['timestamps']. If provided and its length matches
+            csi_data, it's used for the plotting time axis instead of the
+            uniform arange(len)/rate assumption. NOTE: this does not change
+            how the bandpass filter itself is designed/applied -- that still
+            assumes quasi-uniform sampling at the average `rate`, since
+            scipy's Butterworth filtfilt requires an evenly-spaced signal.
+        """
         Path(output_dir).mkdir(exist_ok=True)
         
         # Update sampling rate from metadata
         if metadata and 'rate' in metadata:
             self.config.sampling_rate = metadata['rate']
             print(f"Using sampling rate: {self.config.sampling_rate:.1f} Hz")
+        
+        # Prefer metadata['timestamps'] if the caller didn't pass real_timestamps
+        # explicitly but it's available on the metadata dict.
+        if real_timestamps is None and metadata is not None:
+            real_timestamps = metadata.get('timestamps')
+        
+        if real_timestamps is not None and len(real_timestamps) == csi_data.shape[0]:
+            self.real_timestamps = np.asarray(real_timestamps, dtype=np.float64)
+            print("Using real per-packet capture timestamps for time axis")
+        else:
+            self.real_timestamps = None
         
         print("\n" + "="*60)
         print("HEARTBEAT EXTRACTION AND ANALYSIS")
@@ -318,7 +341,10 @@ class HeartbeatExtractor:
         
         # 1. Heartbeat waveform with peaks
         ax1 = plt.subplot(3, 2, 1)
-        time_axis = np.arange(len(self.heartbeat_signal)) / self.config.sampling_rate
+        if self.real_timestamps is not None:
+            time_axis = self.real_timestamps
+        else:
+            time_axis = np.arange(len(self.heartbeat_signal)) / self.config.sampling_rate
         ax1.plot(time_axis, self.heartbeat_signal, 'b-', linewidth=1, alpha=0.7)
         ax1.plot(time_axis[peak_result['peaks']], 
                 self.heartbeat_signal[peak_result['peaks']], 
@@ -442,7 +468,10 @@ class HeartbeatExtractor:
         if n_plot == 1:
             axes = [axes]
         
-        time_axis = np.arange(len(self.heartbeat_signal)) / self.config.sampling_rate
+        if self.real_timestamps is not None:
+            time_axis = self.real_timestamps
+        else:
+            time_axis = np.arange(len(self.heartbeat_signal)) / self.config.sampling_rate
         
         for idx in range(n_plot):
             axes[idx].plot(time_axis, self.filtered_data[:, idx], linewidth=1)

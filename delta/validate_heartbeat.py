@@ -84,6 +84,10 @@ class HeartbeatValidator:
             self.csi_data, self.metadata = loader.load()
         
         print(f"  Loaded {self.metadata['n_packets']} packets at {self.metadata['rate']:.1f} Hz")
+        if self.metadata.get('n_gaps', 0) > 0:
+            print(f"  WARNING: {self.metadata['n_gaps']} sequence gap(s) detected "
+                  f"(~{self.metadata['n_dropped_estimate']} packet(s) possibly dropped) "
+                  f"-- rate/timing may be less reliable")
         return self.csi_data, self.metadata
     
     def load_groundtruth(self, csv_path):
@@ -133,8 +137,19 @@ class HeartbeatValidator:
         self.csi_peaks = peak_result['peaks']
         self.csi_heart_rates = peak_result['heart_rates']
         
-        # Create timestamp array for CSI
-        self.csi_timestamps = np.arange(len(self.csi_heartbeat)) / config.sampling_rate
+        # Create timestamp array for CSI. Prefer real per-packet capture
+        # timestamps (from the loader's metadata['timestamps']) over the
+        # uniform arange(len)/rate assumption -- real timestamps reflect
+        # actual packet jitter/gaps, which matters for the alignment search
+        # below (200ms match tolerance is tight enough for it to matter).
+        real_ts = self.metadata.get('timestamps')
+        if real_ts is not None and len(real_ts) == len(self.csi_heartbeat):
+            self.csi_timestamps = np.asarray(real_ts, dtype=np.float64)
+            print("  Using real per-packet capture timestamps for CSI time axis")
+        else:
+            self.csi_timestamps = np.arange(len(self.csi_heartbeat)) / config.sampling_rate
+            print("  WARNING: real timestamps unavailable/length-mismatched; "
+                  "falling back to uniform-rate time axis")
         
         print(f"  Detected {len(self.csi_peaks)} peaks")
         print(f"  Heart rate (FFT): {self.csi_heart_rate_fft['heart_rate']:.1f} BPM")
