@@ -4,6 +4,16 @@
 
 1. Valid heartbeat
 
+## Capture
+
+```bash
+sudo python live_monitor.py --iface wlan0 --chip 43455c0 --bw 80 --capture-mode complex
+# press 'c' to start recording, 'c' again to stop, 'q' to quit
+
+python3 heartbeat-giop.py
+# press 'c' to start recording, 'c' again to stop, 'q' to quit
+```
+
 ## Usage
 
 ### `run_pipeline.py` -> apply all filters and plot graphs
