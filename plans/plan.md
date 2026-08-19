@@ -242,6 +242,25 @@ python align_beats.py --csi capture.pcap --groundtruth ground_truth.csv
 |HR Correlation|	> 0.8|
 |Timing Error|	< 50 ms|
 
+## Recommended Testing Plan 2
+
+1. Combine SC 187 and SC 2 (Best of both)
+2. Improve Peak Detection (Reduce False Positives)
+3. Create a Test Script for SC 187 + SC 2 Combination
+4. Visual Quality Check of SC 187 vs Auto-Select
+
+### Next focus: Reduce false positives while maintaining high recall. This means:
+
+1. Better peak detection (adaptive thresholding)
+
+1. Combine SC 187 + SC 2
+
+1. Maybe add a confidence/quality metric to filter out weak peaks
+
+Try the combination test and let me know the results!
+
+
+
 # WiPulse Project Plan
 
 ## Objective

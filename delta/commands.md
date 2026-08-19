@@ -90,3 +90,33 @@ python psd_subcarrier_analysis.py --csi captures/Alicia/csi_capture_20260818_193
 python test_psd_vs_auto.py --csi captures/Alicia/csi_capture_20260818_193158.csv --groundtruth captures/Alicia/ground_truth_20260818_193154.csv
 
 ```
+
+## Key Parameters to Tune
+
+|Parameter|	Current|	Range to Try|	Rationale|
+|---|---|---|---|
+|Low cutoff|	0.8 Hz|	0.5-1.0 Hz|	Catch lower heart rates|
+|High cutoff|	2.5 Hz|	2.0-3.5 Hz|	Include harmonics|
+|Filter order|	3|	2-5|	Balance sharpness vs stability|
+|Peak detection threshold|	0.3 std|	0.2-0.6 std|	Adjust sensitivity|
+|Min beat distance|	300ms|	250-400ms|	Physiological range|
+
+## Success Criteria
+
+|Metric|	Target|
+|---|---|
+|F1-Score|	> 0.75|
+|HR MAE|	< 5 BPM|
+|HR Correlation|	> 0.8|
+|Timing Error|	< 50 ms|
+
+### Metrics Explained
+
+|Metric|	Description|
+|---|---|
+|Precision|	% of CSI detections that are correct|
+|Recall|	% of actual beats that were detected|
+|F1-Score|	Harmonic mean of precision and recall|
+|MAE|	Mean absolute error in beat timing|
+|RMSE|	Root mean square error of heart rate|
+|Correlation|	Pearson correlation of heart rates|

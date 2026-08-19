@@ -95,49 +95,78 @@ class CSIProcessor:
         return self.filtered_data, self.problematic_mask
     
     def extract_heartbeat(self, low_freq=0.8, high_freq=2.5, order=3, 
-                         auto_select=True, output_dir='heartbeat'):
+                     auto_select=True, output_dir='heartbeat',
+                     subcarriers=None, normalize_amplitude=False):
         """
         Extract heartbeat signal from filtered CSI data
-        
+    
         Args:
             low_freq: Lower cutoff frequency (Hz) for bandpass filter
             high_freq: Upper cutoff frequency (Hz) for bandpass filter  
             order: Butterworth filter order
             auto_select: Auto-select best subcarriers for heartbeat extraction
             output_dir: Output directory for heartbeat analysis plots
+            subcarriers: List of specific subcarriers to use (overrides auto_select)
         """
         if self.filtered_data is None:
-            # If no filtered data, use original
             print("\nWARNING: No filtered data available. Using original CSI data.")
             data_to_use = self.csi_data
         else:
             data_to_use = self.filtered_data
-        
+    
         print("\n" + "="*60)
         print("STEP 3: Heartbeat Extraction")
         print("="*60)
-        
+    
         # Configure heartbeat extraction
         config = HeartbeatConfig()
         config.bandpass_low = low_freq
         config.bandpass_high = high_freq
         config.filter_order = order
-        config.use_all_subcarriers = not auto_select
-        
+    
+        # Use specified subcarriers if provided
+        if subcarriers is not None:
+            config.use_all_subcarriers = False
+            config.manual_subcarriers = subcarriers
+            print(f"  Using manual subcarriers: {subcarriers}")
+        else:
+            config.use_all_subcarriers = not auto_select
+            if auto_select:
+                print("  Using auto-selection for subcarriers")
+    
         # Update sampling rate from metadata
         if self.metadata and 'rate' in self.metadata:
             config.sampling_rate = self.metadata['rate']
         else:
             config.sampling_rate = 100.0  # Default
-        
+    
         # Create extractor and run analysis
         extractor = HeartbeatExtractor(config)
+    
+        # If manual subcarriers, override the selection
+        if subcarriers is not None:
+            # Override the apply_bandpass_filter method to use specific subcarriers
+            original_apply = extractor.apply_bandpass_filter
+        
+            def apply_with_manual(csi_data, subcarrier_indices=None):
+                return original_apply(csi_data, subcarrier_indices=subcarriers)
+        
+            extractor.apply_bandpass_filter = apply_with_manual
+    
         self.heartbeat_result = extractor.run_full_analysis(
             data_to_use, 
             self.metadata, 
             output_dir
         )
-        
+
+        # Apply amplitude normalization if requested
+        if normalize_amplitude:
+            from run_best_method_adaptive import remove_amplitude_modulation
+            # Apply to the extracted signal
+            self.heartbeat_signal, _ = remove_amplitude_modulation(
+                self.heartbeat_signal, self.metadata['rate']
+        )
+    
         return self.heartbeat_result
     
     def create_plots(self, output_dir='graphs', prefix='', 
@@ -225,20 +254,22 @@ class CSIProcessor:
             return output_file
     
     def run_full_pipeline(self, file_path, output_dir='graphs', 
-                         filter_config=None, save_filtered=True,
-                         extract_heartbeat=True, 
-                         heart_low=0.8, heart_high=2.5, heart_order=3):
+                     filter_config=None, save_filtered=True,
+                     extract_heartbeat=True, 
+                     heart_low=0.8, heart_high=2.5, heart_order=3,
+                     subcarriers=None):  # Add this parameter
         """Run the complete processing pipeline with heartbeat extraction"""
         # Load data
         self.load_data(file_path)
-        
+    
         # Apply filters
         self.apply_filters(filter_config)
-        
+    
         # Extract heartbeat (new!)
         if extract_heartbeat:
             self.extract_heartbeat(heart_low, heart_high, heart_order, 
-                                  output_dir=output_dir)
+                              output_dir=output_dir,
+                              subcarriers=subcarriers)  # Pass through
         
         # Generate plots
         self.create_plots(output_dir)
@@ -266,6 +297,17 @@ class CSIProcessor:
         """Run only analysis (load + plot), no filtering"""
         self.load_data(file_path)
         self.create_plots(output_dir, create_comparison=False, create_filtered=False)
+
+    def set_subcarriers(self, subcarrier_list):
+        """Set specific subcarriers to use for heartbeat extraction"""
+        if subcarrier_list is not None:
+            if isinstance(subcarrier_list, str):
+                self.subcarriers = [int(x.strip()) for x in subcarrier_list.split(',')]
+            else:
+                self.subcarriers = subcarrier_list
+            print(f"Using specific subcarriers: {self.subcarriers}")
+        else:
+            self.subcarriers = None
 
 
 def main():
@@ -326,6 +368,10 @@ Examples:
                        help='Butterworth filter order (default: 3)')
     parser.add_argument('--heart-auto-select', action='store_true',
                        help='Auto-select best subcarriers for heartbeat extraction')
+    parser.add_argument('--subcarriers', type=str, default=None,
+                   help='Comma-separated list of subcarriers to use (e.g., "187,2,1,188,161")')
+    parser.add_argument('--normalize-amplitude', action='store_true',
+                   help='Apply amplitude normalization to remove respiratory modulation')
     
     args = parser.parse_args()
     
@@ -368,7 +414,8 @@ Examples:
                 extract_heartbeat=not args.no_heartbeat,
                 heart_low=args.heart_low,
                 heart_high=args.heart_high,
-                heart_order=args.heart_order
+                heart_order=args.heart_order,
+                subcarriers=args.subcarriers
             )
     
     except Exception as e:
