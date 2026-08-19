@@ -8,7 +8,7 @@ The Nyquist Rate: This is the minimum sampling speed required to avoid distortio
 
 The Nyquist Frequency (or Folding Frequency): This is exactly half of the sampling rate. Any frequency present in the original signal that is higher than the Nyquist frequency will "fold" over and cause distortion in the digital version. This phenomenon is known as aliasing.
 
-![Nyquist](img/processing/Nyquist.PNG)
+![Nyquist](/img/processing/Nyquist.PNG)
 
 #### Hampel filter
 
@@ -32,7 +32,7 @@ A notch filter is a type of **band-stop filter** with a very narrow stopband and
 
 It blocks or heavily attenuates a single specific frequency or a tiny range of frequencies, while letting all other frequencies pass through completely unchanged.
 
-![band stop](img/processing/Band-Reject_Filter.svg.jpg)
+![band stop](/img/processing/Band-Reject_Filter.svg.jpg)
 
 Bandstop filter is a lowpass + highpass
 
@@ -54,10 +54,10 @@ Lower Q → wider notch
 
 third-order -> amount of poles (capacitors)
 
-![Savitzky-Golay](img/processing/Butterworth-filters-ideal-response-6_Q320.jpg)
+![Savitzky-Golay](/img/processing/Butterworth-filters-ideal-response-6_Q320.jpg)
 
 #### Savitzky-Golay filtering
 
 a digital smoothing and filtering method that fits a low-degree polynomial to a sliding window of data points using linear least squares. It removes high-frequency noise from a signal while better preserving peak heights, widths, and high-frequency details compared to standard moving average filters.
 
-![Savitzky-Golay](img/processing/Savitzky-Golay.jpg)
+![Savitzky-Golay](/img/processing/Savitzky-Golay.jpg)
