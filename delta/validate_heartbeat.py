@@ -772,6 +772,13 @@ def main():
                        help='Upper cutoff for heartbeat filter (Hz)')
     parser.add_argument('--heart-order', type=int, default=3,
                        help='Butterworth filter order')
+
+    # Add this to the argument parser   ----> Remove this if phase processing sucks !!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    parser.add_argument('--use-phase', action='store_true',
+                    help='Use phase instead of amplitude for heartbeat extraction')
+    parser.add_argument('--phase-diff', action='store_true',
+                    help='Use phase differences between subcarriers')
+    # Up until here is phase still to be removed
     
     args = parser.parse_args()
     
