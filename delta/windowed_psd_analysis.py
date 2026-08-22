@@ -783,9 +783,11 @@ def main():
     # ------------------------------------------------------------------
     # CONFIGURATION
     # ------------------------------------------------------------------
-    csi_path = r"captures\Allen-S,0,1\csi_capture_20260820_135250.csv"
-    gt_path = r"captures\Allen-S,0,1\ground_truth_20260820_135247.csv"
-
+    #csi_path = r"captures\Allen-S,0,1\csi_capture_20260820_135250.csv"
+    #gt_path = r"captures\Allen-S,0,1\ground_truth_20260820_135247.csv"
+    csi_path = r"captures\Allen-N,0,1\csi_capture_20260820_133513.csv"
+    gt_path = r"captures\Allen-N,0,1\ground_truth_20260820_133509.csv"
+    
     LOW = 1.2
     HIGH = 2.8
     ORDER = 4
@@ -848,6 +850,18 @@ def main():
             csi_raw_timestamps,
             gt_df,
         )
+    )
+
+    print("\nTIMESTAMP DEBUG")
+    print(f"CSI first raw timestamp : {csi_raw_timestamps[0]:.6f}")
+    print(f"GT first raw timestamp  : {gt_df['ts'].iloc[0]:.6f}")
+
+    print(f"CSI first aligned time  : {csi_common[0]:.6f}")
+    print(f"GT first aligned time   : {gt_common[0]:.6f}")
+
+    print(
+        f"CSI starts relative to GT by: "
+        f"{csi_common[0] - gt_common[0]:.6f} seconds"
     )
 
     print(f"\nTimestamp alignment mode: {time_mode}")
