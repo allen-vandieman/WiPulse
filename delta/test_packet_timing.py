@@ -25,7 +25,8 @@ from read_csv_csi import CSIDataLoader
 
 #CSI_PATH = r"captures\Allen-S,0,1\csi_capture_20260820_135250.csv"
 #CSI_PATH = r"captures\Allen-N,0,1\csi_capture_20260820_133513.csv"
-CSI_PATH = r"captures\Allen-N,0,0\csi_capture_20260820_133907.csv"
+#CSI_PATH = r"captures\Allen-N,0,0\csi_capture_20260820_133907.csv"
+CSI_PATH = r"captures\Alicia\csi_capture_20260818_193158.csv"
 
 PLOT = True
 

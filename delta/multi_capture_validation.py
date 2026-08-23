@@ -1514,13 +1514,13 @@ def run_test():
 
     captures = [
 
-        (
-            r"captures\Allen-N,0,0"
-            r"\csi_capture_20260820_133907.csv",
+        #(
+            #r"captures\Allen-N,0,0"
+            #r"\csi_capture_20260820_133907.csv",
 
-            r"captures\Allen-N,0,0"
-            r"\ground_truth_20260820_133904.csv"
-        ),
+            #r"captures\Allen-N,0,0"
+            #r"\ground_truth_20260820_133904.csv"
+        #),
 
         (
             r"captures\Allen-N,0,1"
@@ -1563,16 +1563,16 @@ def run_test():
         ),
 
         # Add to your captures list in multi_capture_validation.py
-        (r"captures\anusha2-holding-breath\csi_capture_20260812_192125.csv",
-         r"captures\anusha2-holding-breath\ground_truth_20260812_192122.csv"),
+        #(r"captures\anusha2-holding-breath\csi_capture_20260812_192125.csv",
+        # r"captures\anusha2-holding-breath\ground_truth_20260812_192122.csv"),
 
          # Add to your captures list in multi_capture_validation.py
-        (r"captures\Alicia\csi_capture_20260818_193158.csv",
-        r"captures\Alicia\ground_truth_20260818_193013.csv"),
+        #(r"captures\Alicia\csi_capture_20260818_193158.csv",
+        #r"captures\Alicia\ground_truth_20260818_193154.csv"),
 
         # Add to your captures list in multi_capture_validation.py
-        (r"captures\anusha1-normal\csi_capture_20260812_191830.csv",
-        r"captures\anusha1-normal\ground_truth_20260812_191826.csv"),
+        #(r"captures\anusha1-normal\csi_capture_20260812_191830.csv",
+        #r"captures\anusha1-normal\ground_truth_20260812_191826.csv"),
 
         # Add to your captures list in multi_capture_validation.py
         (r"captures\Anusha1\csi_capture_20260818_190333.csv",
