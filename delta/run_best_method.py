@@ -1,6 +1,6 @@
-# run_best_method.py
+# run_best_method_fixed.py - COMPLETE FIXED VERSION
 # Standalone script using best parameters and subcarriers
-# Usage: python run_best_method.py --csi captures/anusha2-holding-breath/csi_capture_20260812_192125.csv --groundtruth captures/anusha2-holding-breath/ground_truth_20260812_192122.csv
+# Usage: python run_best_method_fixed.py --csi .\captures\anusha2-holding-breath\csi_capture_20260812_192125.csv --groundtruth .\captures\anusha2-holding-breath\ground_truth_20260812_192122.csv
 
 import sys
 import argparse
@@ -14,7 +14,37 @@ import matplotlib.pyplot as plt
 
 from read_csv_csi import CSIDataLoader
 from filters import CSIFilter, FilterConfig
-from validate_heartbeat import HeartbeatValidator
+
+
+def remove_respiration_improved(signal_data, fs):
+    """
+    Remove respiratory component using a high-Q notch filter
+    High Q = narrow notch, minimal impact on heartbeat
+    """
+    # Find dominant respiratory frequency
+    freqs, psd = signal.welch(
+        signal_data - np.mean(signal_data),
+        fs=fs,
+        nperseg=min(256, len(signal_data)),
+        scaling='density'
+    )
+    
+    # Find peak in 0.15-0.4 Hz
+    resp_mask = (freqs >= 0.15) & (freqs <= 0.4)
+    if np.any(resp_mask):
+        resp_freq = freqs[resp_mask][np.argmax(psd[resp_mask])]
+    else:
+        resp_freq = 0.25
+    
+    # Use a high-Q notch filter (narrow bandwidth)
+    nyquist = fs / 2
+    if resp_freq > 0 and resp_freq < nyquist:
+        # Q=30 gives a very narrow notch
+        b, a = signal.iirnotch(resp_freq / nyquist, Q=30)
+        filtered = signal.filtfilt(b, a, signal_data)
+        return filtered, resp_freq
+    else:
+        return signal_data, resp_freq
 
 
 def quick_validate_signal(signal_data, gt_df, fs):
@@ -116,45 +146,12 @@ def quick_validate_signal(signal_data, gt_df, fs):
         return {'f1': 0, 'precision': 0, 'recall': 0, 'hr_mae': 999, 'n_peaks': 0}
 
 
-def remove_respiration(csi_magnitudes, fs, sc_indices=None):
-    """Remove respiratory component using notch filter"""
-    if sc_indices is None:
-        sc_indices = range(csi_magnitudes.shape[1])
-    
-    filtered_mags = csi_magnitudes.copy()
-    
-    for sc in sc_indices:
-        signal_data = csi_magnitudes[:, sc]
-        
-        # Find dominant respiratory frequency (0.15-0.4 Hz)
-        freqs, psd = signal.welch(
-            signal_data - np.mean(signal_data),
-            fs=fs,
-            nperseg=min(256, len(signal_data)),
-            scaling='density'
-        )
-        
-        resp_mask = (freqs >= 0.15) & (freqs <= 0.4)
-        if np.any(resp_mask):
-            resp_freq = freqs[resp_mask][np.argmax(psd[resp_mask])]
-        else:
-            resp_freq = 0.25
-        
-        # Remove respiratory component with notch filter
-        if resp_freq > 0 and resp_freq < fs/2:
-            nyquist = fs / 2
-            b, a = signal.iirnotch(resp_freq / nyquist, Q=10)
-            filtered_mags[:, sc] = signal.filtfilt(b, a, signal_data)
-    
-    return filtered_mags
-
-
-def run_best_method(csi_path, gt_path, output_dir='best_results'):
-    """Run the best method with all optimizations"""
+def run_best_method_fixed(csi_path, gt_path, output_dir='best_results'):
+    """Run the best method with improved respiratory removal"""
     Path(output_dir).mkdir(exist_ok=True)
     
     print("\n" + "="*70)
-    print("BEST METHOD: PSD Top 10 + Optimal Filter + Respiratory Removal")
+    print("BEST METHOD: PSD Top 10 + High-Q Notch Filter")
     print("="*70)
     
     # Load data
@@ -184,19 +181,19 @@ def run_best_method(csi_path, gt_path, output_dir='best_results'):
             'subcarriers': best_subcarriers,
             'remove_resp': False
         },
-        'PSD Top 10 + Resp Removal': {
+        'PSD Top 10 + Q=30 Notch': {
             'subcarriers': best_subcarriers,
             'remove_resp': True
         },
-        'SC 187 + Resp Removal': {
+        'SC 187 + Q=30 Notch': {
             'subcarriers': [187],
             'remove_resp': True
         },
-        'SC 2 + Resp Removal': {
+        'SC 2 + Q=30 Notch': {
             'subcarriers': [2],
             'remove_resp': True
         },
-        'Auto-Select + Resp Removal': {
+        'Auto-Select + Q=30 Notch': {
             'subcarriers': [232, 228, 49, 60, 50],
             'remove_resp': True
         }
@@ -216,22 +213,8 @@ def run_best_method(csi_path, gt_path, output_dir='best_results'):
         
         # Remove respiration if requested
         if config['remove_resp']:
-            # Apply respiratory removal to the combined signal
-            # First find respiratory frequency in the combined signal
-            freqs, psd = signal.welch(
-                signal_data - np.mean(signal_data),
-                fs=fs,
-                nperseg=min(256, len(signal_data)),
-                scaling='density'
-            )
-            resp_mask = (freqs >= 0.15) & (freqs <= 0.4)
-            if np.any(resp_mask):
-                resp_freq = freqs[resp_mask][np.argmax(psd[resp_mask])]
-                if resp_freq > 0 and resp_freq < fs/2:
-                    nyquist = fs / 2
-                    b, a = signal.iirnotch(resp_freq / nyquist, Q=10)
-                    signal_data = signal.filtfilt(b, a, signal_data)
-                    print(f"  Removed respiratory frequency: {resp_freq:.2f} Hz")
+            signal_data, resp_freq = remove_respiration_improved(signal_data, fs)
+            print(f"  Removed respiratory frequency: {resp_freq:.3f} Hz")
         
         # Validate
         metrics = quick_validate_signal(signal_data, gt_df, fs)
@@ -244,7 +227,7 @@ def run_best_method(csi_path, gt_path, output_dir='best_results'):
     # Create results DataFrame
     results_df = pd.DataFrame(results)
     results_df = results_df.sort_values('f1', ascending=False)
-    results_df.to_csv(f'{output_dir}/best_results.csv', index=False)
+    results_df.to_csv(f'{output_dir}/best_results_fixed.csv', index=False)
     
     # Create comparison plot
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
@@ -276,8 +259,8 @@ def run_best_method(csi_path, gt_path, output_dir='best_results'):
     
     plt.suptitle('Best Method Comparison', fontsize=14, fontweight='bold')
     plt.tight_layout()
-    plt.savefig(f'{output_dir}/best_method_comparison.png', dpi=300, bbox_inches='tight')
-    print(f"\nSaved comparison plot to '{output_dir}/best_method_comparison.png'")
+    plt.savefig(f'{output_dir}/best_method_comparison_fixed.png', dpi=300, bbox_inches='tight')
+    print(f"\nSaved comparison plot to '{output_dir}/best_method_comparison_fixed.png'")
     plt.close()
     
     # Print summary
@@ -302,7 +285,7 @@ def run_best_method(csi_path, gt_path, output_dir='best_results'):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Run best method with all optimizations')
+    parser = argparse.ArgumentParser(description='Run best method with improved respiratory removal')
     parser.add_argument('--csi', required=True, help='CSI data file')
     parser.add_argument('--groundtruth', required=True, help='Ground truth CSV')
     parser.add_argument('--output-dir', default='best_results', help='Output directory')
@@ -317,7 +300,7 @@ def main():
         print(f"Error: Ground truth file '{args.groundtruth}' not found!")
         sys.exit(1)
     
-    run_best_method(args.csi, args.groundtruth, args.output_dir)
+    run_best_method_fixed(args.csi, args.groundtruth, args.output_dir)
 
 
 if __name__ == "__main__":
