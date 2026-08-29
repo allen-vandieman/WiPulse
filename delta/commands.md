@@ -173,6 +173,25 @@ python validate_heartbeat.py --csi best_position/csi_capture.csv --groundtruth b
 python multi_capture_validation.py
 ```
 
+## 7.5 Run the Improved Version
+
+```bash
+python combined_amplitude_phase_test_v2.py --csi captures/Allen-S,0,1/csi_capture_20260820_135250.csv --groundtruth captures/Allen-S,0,1/ground_truth_20260820_135247.csv
+```
+
+### For Position Optimization
+
+- To find the best sitting position, collect captures at different positions and run:
+
+
+```bash
+# With explicit positions
+python combined_amplitude_phase_test_v2.py --position-optimization --positions "center" captures/center/csi.csv "left" captures/left/csi.csv "right" captures/right/csi.csv
+
+# Or auto-detect
+python combined_amplitude_phase_test_v2.py --position-optimization
+```
+
 ## Key Parameters to Tune
 
 |Parameter|	Current|	Range to Try|	Rationale|
