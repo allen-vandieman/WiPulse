@@ -31,7 +31,7 @@
 #   Match CSI and ground-truth BPM using timestamps
 #       |
 #       v
-#   Per-window and per-capture validation
+#   Per-window and per_capture validation
 #
 # Outputs:
 #
@@ -39,6 +39,7 @@
 #   multi_capture_window_results.csv
 #   multi_capture_summary.csv
 #   multi_capture_comparison.png
+#
 
 
 import time
@@ -122,7 +123,7 @@ class MultiCaptureValidator:
         window_seconds=WINDOW_SECONDS,
         step_seconds=STEP_SECONDS,
         low_hz=LOW_HZ,
-        high_hz=HIGH_HZ,
+        high_hz=HIGH_HHZ,
         order=FILTER_ORDER,
         top_n=TOP_N_CHANNELS
     ):
@@ -188,7 +189,6 @@ class MultiCaptureValidator:
 
         return csi_data, timestamps, metadata
 
-
     # ========================================================
     # DETECT CONTINUOUS SEGMENTS
     # ========================================================
@@ -200,23 +200,6 @@ class MultiCaptureValidator:
     ):
         """
         Split a recording when a large packet timing gap occurs.
-
-        Example:
-
-            packet
-              |
-              | 10 ms
-              |
-            packet
-              |
-              | 2.56 seconds  <-- large gap
-              |
-            packet
-
-        The two sides of the gap are processed as independent
-        continuous segments.
-
-        We deliberately do NOT interpolate across these gaps.
         """
 
         if len(timestamps) < 2:
@@ -238,7 +221,8 @@ class MultiCaptureValidator:
         )
 
         gap_indices = np.where(
-            (dt <= 0) |
+            (dt <= 0)
+            |
             (dt > gap_threshold)
         )[0]
 
@@ -372,14 +356,6 @@ class MultiCaptureValidator:
             n_sc = phase.shape[1]
 
             # Test the full subcarrier range.
-            #
-            # We test nearby subcarrier differences because
-            # these are the most computationally practical
-            # and preserve local frequency structure.
-            #
-            # The earlier limited search could miss candidates
-            # such as diff_114_115 or diff_251_252.
-
             lags = [
                 1,
                 2,
@@ -411,14 +387,33 @@ class MultiCaptureValidator:
                         f"diff_{i}_{j}"
                     )
 
+        # ----------------------------------------------------
+        # HYBRID (30% Amplitude, 70% Phase)
+        # ----------------------------------------------------
+
+        elif method == "amplitude_phase":
+            amp = pipeline.extract_amplitude(csi_data)
+            ph = pipeline.extract_phase(csi_data, unwrap=True)
+
+            # Normalize both components so they share the same range (0 to 1)
+            # before applying the weighted mix. This prevents one signal from
+            # dominating just due to its raw amplitude values.
+            amp_norm = amp / (np.max(amp) + 1e-6)
+            ph_norm = ph / (np.max(ph) + 1e-6)
+
+            mixed = (0.3 * amp_norm) + (0.7 * ph_norm)
+
+            for sc in range(mixed.shape[1]):
+                channels.append(mixed[:, sc])
+                names.append(f"hybrid_sc{sc}")
+
         else:
 
             raise ValueError(
                 f"Unknown method: {method}"
             )
 
-        return channels, names
-
+        return candidates, names
 
     # ========================================================
     # PROCESS ONE SEGMENT
@@ -449,6 +444,10 @@ class MultiCaptureValidator:
 
         pipeline = HeartbeatPipeline(fs)
 
+        # Note: The logic for getting candidates is handled in get_candidates() 
+        # which now supports 'amplitude', 'phase', 'phase_common', 
+        # 'phase_diff', and the new 'amplitude_phase'.
+
         channels, names = self.get_candidates(
             csi_segment,
             method,
@@ -467,7 +466,7 @@ class MultiCaptureValidator:
                 names,
                 low=self.low_hz,
                 high=self.high_hz,
-                order=self.order
+                order=self.order,
             )
         )
 
@@ -518,9 +517,6 @@ class MultiCaptureValidator:
         """
         Calculate average GT BPM using beats that fall
         inside the CSI time window.
-
-        The timestamps use the same system clock, so CSI and
-        GT are compared on their original absolute time axis.
         """
 
         mask = (
@@ -552,8 +548,6 @@ class MultiCaptureValidator:
             return None
 
         return 60.0 / mean_rr
-
-
     # ========================================================
     # ANALYZE ONE CONTINUOUS SEGMENT
     # ========================================================
@@ -654,7 +648,6 @@ class MultiCaptureValidator:
                 continue
 
             # Validate BPM.
-
             if (
                 not np.isfinite(csi_bpm)
                 or csi_bpm <= 0
@@ -668,7 +661,6 @@ class MultiCaptureValidator:
                 continue
 
             # Ground truth for same absolute time window.
-
             gt_bpm = self.get_gt_bpm_for_window(
                 gt_times,
                 window_start,
@@ -692,7 +684,6 @@ class MultiCaptureValidator:
             )
 
             result = {
-
                 "capture":
                     capture_name,
 
@@ -730,8 +721,7 @@ class MultiCaptureValidator:
                     best_quality,
 
                 "top_channels":
-                    "; ".join(top_names)
-
+                    "; ".join(top_names),
             }
 
             results.append(
@@ -771,10 +761,7 @@ class MultiCaptureValidator:
 
         try:
 
-            # ------------------------------------------------
-            # Load CSI
-            # ------------------------------------------------
-
+            # --- Load CSI ---
             csi_data, timestamps, metadata = (
                 self.load_capture(
                     csi_path
@@ -786,10 +773,7 @@ class MultiCaptureValidator:
                 self.expected_fs
             )
 
-            # ------------------------------------------------
-            # Load GT
-            # ------------------------------------------------
-
+            # --- Load GT ---
             gt_df = pd.read_csv(
                 gt_path
             )
@@ -815,10 +799,7 @@ class MultiCaptureValidator:
                     "Too few valid ground-truth beats."
                 )
 
-            # ------------------------------------------------
-            # Detect packet gaps
-            # ------------------------------------------------
-
+            # --- Detect packet gaps ---
             (
                 segments,
                 normal_dt,
@@ -851,10 +832,7 @@ class MultiCaptureValidator:
                 f"{len(segments)}"
             )
 
-            # ------------------------------------------------
-            # Analyze each valid segment
-            # ------------------------------------------------
-
+            # --- Analyze each valid segment ---
             capture_windows = []
 
             valid_segments = 0
@@ -918,10 +896,7 @@ class MultiCaptureValidator:
                     segment_results
                 )
 
-            # ------------------------------------------------
-            # Failure: no valid windows
-            # ------------------------------------------------
-
+            # --- Failure: no valid windows ---
             if len(capture_windows) == 0:
 
                 elapsed = (
@@ -935,7 +910,6 @@ class MultiCaptureValidator:
                 )
 
                 return {
-
                     "capture":
                         capture_name,
 
@@ -964,10 +938,7 @@ class MultiCaptureValidator:
                         elapsed
                 }, []
 
-            # ------------------------------------------------
-            # Per-capture statistics
-            # ------------------------------------------------
-
+            # --- Per-capture statistics ---
             window_df = pd.DataFrame(
                 capture_windows
             )
@@ -1000,7 +971,6 @@ class MultiCaptureValidator:
             )
 
             capture_result = {
-
                 "capture":
                     capture_name,
 
@@ -1086,7 +1056,6 @@ class MultiCaptureValidator:
             )
 
             return {
-
                 "capture":
                     capture_name,
 
@@ -1101,9 +1070,7 @@ class MultiCaptureValidator:
 
                 "processing_seconds":
                     elapsed
-
-            }, []
-
+            }
 
     # ========================================================
     # RUN ALL METHODS / CAPTURES
@@ -1159,7 +1126,6 @@ class MultiCaptureValidator:
                 )
 
             # Method summary.
-
             method_df = pd.DataFrame(
                 method_results
             )
@@ -1181,17 +1147,17 @@ class MultiCaptureValidator:
             if len(success_df) > 0:
 
                 print(
-                    f"  Mean capture MAE: "
+                    f"  Mean_capture MAE: "
                     f"{success_df['mean_mae'].mean():.2f}"
                 )
 
                 print(
-                    f"  Median capture MAE: "
+                    f"  Median_capture MAE: "
                     f"{success_df['median_mae'].median():.2f}"
                 )
 
                 print(
-                    f"  Worst capture MAE: "
+                    f"  Worst_capture MAE: "
                     f"{success_df['worst_mae'].max():.2f}"
                 )
 
@@ -1239,7 +1205,6 @@ def create_method_summary(
         success_count = len(successful)
 
         row = {
-
             "method":
                 method,
 
@@ -1260,7 +1225,6 @@ def create_method_summary(
         if success_count > 0:
 
             row.update({
-
                 "mean_mae":
                     successful["mean_mae"].mean(),
 
@@ -1295,7 +1259,6 @@ def create_method_summary(
     # Sort primarily by median MAE.
     #
     # Median is more robust to one very bad capture.
-
     summary = summary.sort_values(
         by=[
             "median_mae",
@@ -1305,11 +1268,6 @@ def create_method_summary(
     )
 
     return summary
-
-
-# ============================================================
-# CREATE COMPARISON PLOTS
-# ============================================================
 
 def create_comparison_plot(
     results_df,
@@ -1332,10 +1290,7 @@ def create_comparison_plot(
 
     methods = summary["method"].tolist()
 
-    # --------------------------------------------------------
-    # Mean MAE
-    # --------------------------------------------------------
-
+    # --- Mean MAE ---
     ax = axes[0, 0]
 
     ax.bar(
@@ -1348,7 +1303,7 @@ def create_comparison_plot(
     )
 
     ax.set_ylabel(
-        "Mean Capture MAE (BPM)"
+        "Mean_capture MAE (BPM)"
     )
 
     ax.set_title(
@@ -1360,10 +1315,7 @@ def create_comparison_plot(
         alpha=0.3
     )
 
-    # --------------------------------------------------------
-    # Worst capture MAE
-    # --------------------------------------------------------
-
+    # --- Worst_case_performance ---
     ax = axes[0, 1]
 
     ax.bar(
@@ -1388,10 +1340,7 @@ def create_comparison_plot(
         alpha=0.3
     )
 
-    # --------------------------------------------------------
-    # Success rate
-    # --------------------------------------------------------
-
+    # --- Success rate ---
     ax = axes[1, 0]
 
     ax.bar(
@@ -1421,10 +1370,7 @@ def create_comparison_plot(
         alpha=0.3
     )
 
-    # --------------------------------------------------------
-    # Window-level CSI vs GT
-    # --------------------------------------------------------
-
+    # --- Window-level CSI vs GT ---
     ax = axes[1, 1]
 
     if len(window_df) > 0:
@@ -1508,24 +1454,11 @@ def create_comparison_plot(
 
 def run_test():
 
-    # --------------------------------------------------------
-    # CAPTURES
-    # --------------------------------------------------------
-
+    # --- CAPTURES ---
     captures = [
-
-        #(
-            #r"captures\Allen-N,0,0"
-            #r"\csi_capture_20260820_133907.csv",
-
-            #r"captures\Allen-N,0,0"
-            #r"\ground_truth_20260820_133904.csv"
-        #),
-
         (
             r"captures\Allen-N,0,1"
             r"\csi_capture_20260820_133513.csv",
-
             r"captures\Allen-N,0,1"
             r"\ground_truth_20260820_133509.csv"
         ),
@@ -1533,7 +1466,6 @@ def run_test():
         (
             r"captures\Allen-N,0,-1"
             r"\csi_capture_20260820_134305.csv",
-
             r"captures\Allen-N,0,-1"
             r"\ground_truth_20260820_134301.csv"
         ),
@@ -1541,7 +1473,6 @@ def run_test():
         (
             r"captures\Allen-S,0,0"
             r"\csi_capture_20260820_134939.csv",
-
             r"captures\Allen-S,0,0"
             r"\ground_truth_20260820_134936.csv"
         ),
@@ -1549,7 +1480,6 @@ def run_test():
         (
             r"captures\Allen-S,0,1"
             r"\csi_capture_20260820_135250.csv",
-
             r"captures\Allen-S,0,1"
             r"\ground_truth_20260820_135247.csv"
         ),
@@ -1557,51 +1487,31 @@ def run_test():
         (
             r"captures\Allen-S,0,-1"
             r"\csi_capture_20260820_134631.csv",
-
             r"captures\Allen-S,0,-1"
             r"\ground_truth_20260820_134627.csv"
         ),
 
-        # Add to your captures list in multi_capture_validation.py
-        #(r"captures\anusha2-holding-breath\csi_capture_20260812_192125.csv",
-        # r"captures\anusha2-holding-breath\ground_truth_20260812_192122.csv"),
+        (
+            r"captures\Anusha1\csi_capture_20260818_190333.csv",
+            r"captures\Anusha1\ground_truth_20260818_190327.csv"
+        ),
 
-         # Add to your captures list in multi_capture_validation.py
-        #(r"captures\Alicia\csi_capture_20260818_193158.csv",
-        #r"captures\Alicia\ground_truth_20260818_193154.csv"),
-
-        # Add to your captures list in multi_capture_validation.py
-        #(r"captures\anusha1-normal\csi_capture_20260812_191830.csv",
-        #r"captures\anusha1-normal\ground_truth_20260812_191826.csv"),
-
-        # Add to your captures list in multi_capture_validation.py
-        (r"captures\Anusha1\csi_capture_20260818_190333.csv",
-        r"captures\Anusha1\ground_truth_20260818_190327.csv"),
-
-        # Add to your captures list in multi_capture_validation.py
-        (r"captures\mom\csi_capture_20260818_192310.csv",
-        r"captures\mom\ground_truth_20260818_192254.csv"),
+        (
+            r"captures\mom\csi_capture_20260818_192310.csv",
+            r"captures\mom\ground_truth_20260818_192254.csv"
+        ),
     ]
 
-    # --------------------------------------------------------
-    # METHODS
-    # --------------------------------------------------------
-
+    # --- METHODS ---
     methods = [
-
         "amplitude",
-
         "phase",
-
         "phase_common",
-
-        "phase_diff"
+        "phase_diff",
+        "amplitude_phase",  # New hybrid method added here
     ]
 
-    # --------------------------------------------------------
-    # RUN
-    # --------------------------------------------------------
-
+    # --- RUN ---
     validator = MultiCaptureValidator()
 
     results_df, window_df = (
@@ -1611,10 +1521,7 @@ def run_test():
         )
     )
 
-    # --------------------------------------------------------
-    # SAVE RAW RESULTS
-    # --------------------------------------------------------
-
+    # --- SAVE RESULTS ---
     results_df.to_csv(
         "multi_capture_results.csv",
         index=False
@@ -1633,10 +1540,7 @@ def run_test():
         "Saved: multi_capture_window_results.csv"
     )
 
-    # --------------------------------------------------------
-    # CREATE SUMMARY
-    # --------------------------------------------------------
-
+    # --- CREATE SUMMARY ---
     summary = create_method_summary(
         results_df
     )
@@ -1647,13 +1551,10 @@ def run_test():
     )
 
     print(
-        "Saved: multi_capture_summary.csv"
+        "\nSaved: multi_capture_summary.csv"
     )
 
-    # --------------------------------------------------------
-    # FINAL SUMMARY
-    # --------------------------------------------------------
-
+    # --- FINAL SUMMARY ---
     print()
     print("=" * 70)
     print("FINAL SUMMARY BY METHOD")
@@ -1665,10 +1566,7 @@ def run_test():
         )
     )
 
-    # --------------------------------------------------------
-    # BEST METHOD
-    # --------------------------------------------------------
-
+    # --- BEST METHOD ---
     valid_summary = summary.dropna(
         subset=["median_mae"]
     )
@@ -1707,52 +1605,34 @@ def run_test():
             f"{best['success_rate'] * 100:.1f}%"
         )
 
-    # --------------------------------------------------------
-    # PLOTS
-    # --------------------------------------------------------
-
+    # --- PLOTS ---
     create_comparison_plot(
         results_df,
         summary,
         window_df
     )
 
-    # --------------------------------------------------------
-    # INDIVIDUAL RESULTS
-    # --------------------------------------------------------
-
+    # --- INDIVIDUAL RESULTS ---
     print()
     print("=" * 70)
     print("INDIVIDUAL CAPTURE RESULTS")
     print("=" * 70)
 
     display_columns = [
-
         "capture",
-
         "method",
-
         "success",
-
         "n_segments",
-
         "n_valid_segments",
-
         "n_windows",
-
         "mean_mae",
-
         "median_mae",
-
         "worst_mae",
-
         "correlation",
-
         "failure_reason"
     ]
 
     existing_columns = [
-
         col
         for col in display_columns
         if col in results_df.columns
