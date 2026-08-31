@@ -39,7 +39,6 @@
 #   multi_capture_window_results.csv
 #   multi_capture_summary.csv
 #   multi_capture_comparison.png
-#
 
 
 import time
@@ -78,7 +77,7 @@ STEP_SECONDS = 5.0
 
 # Heart-rate search range.
 LOW_HZ = 0.8
-HIGH_HZ = 2.5
+HIGH_HZ = 2.5 # Fixed high_hz name: HIGH_HHZ -> HIGH_HZ
 
 FILTER_ORDER = 4
 
@@ -123,7 +122,7 @@ class MultiCaptureValidator:
         window_seconds=WINDOW_SECONDS,
         step_seconds=STEP_SECONDS,
         low_hz=LOW_HZ,
-        high_hz=HIGH_HHZ,
+        high_hz=HIGH_HZ, # FIX APPLIED HERE
         order=FILTER_ORDER,
         top_n=TOP_N_CHANNELS
     ):
@@ -203,7 +202,7 @@ class MultiCaptureValidator:
         """
 
         if len(timestamps) < 2:
-            return []
+            return [], None, 0
 
         dt = np.diff(timestamps)
 
@@ -413,7 +412,7 @@ class MultiCaptureValidator:
                 f"Unknown method: {method}"
             )
 
-        return candidates, names
+        return channels, names
 
     # ========================================================
     # PROCESS ONE SEGMENT
@@ -602,6 +601,7 @@ class MultiCaptureValidator:
 
         window_start = start_time
 
+
         while (
             window_start
             +
@@ -747,6 +747,7 @@ class MultiCaptureValidator:
     ):
         """
         Validate one capture using one pipeline method.
+        Returns (result_dict, list_of_windows) or (error_dict, []) on failure.
         """
 
         capture_name = Path(
@@ -909,34 +910,21 @@ class MultiCaptureValidator:
                     "    FAIL: No valid windows."
                 )
 
-                return {
-                    "capture":
-                        capture_name,
-
-                    "method":
-                        method,
-
-                    "success":
-                        False,
-
-                    "failure_reason":
-                        "no_valid_windows",
-
-                    "n_packets":
-                        len(csi_data),
-
-                    "n_segments":
-                        len(segments),
-
-                    "n_valid_segments":
-                        valid_segments,
-
-                    "n_windows":
-                        0,
-
-                    "processing_seconds":
-                        elapsed
-                }, []
+                # Return the required tuple structure: (result dict, window list)
+                return (
+                    {
+                        "capture": capture_name,
+                        "method": method,
+                        "success": False,
+                        "failure_reason": "no_valid_windows",
+                        "n_packets": len(csi_data),
+                        "n_segments": len(segments),
+                        "n_valid_segments": valid_segments,
+                        "n_windows": 0,
+                        "processing_seconds": elapsed
+                    }, 
+                    [] # Empty list for windows
+                )
 
             # --- Per-capture statistics ---
             window_df = pd.DataFrame(
@@ -1043,8 +1031,7 @@ class MultiCaptureValidator:
                 capture_windows
             )
 
-        except Exception as e:
-
+        except Exception as e: # FIX APPLIED HERE
             elapsed = (
                 time.time()
                 -
@@ -1055,22 +1042,17 @@ class MultiCaptureValidator:
                 f"    ERROR: {e}"
             )
 
-            return {
-                "capture":
-                    capture_name,
-
-                "method":
-                    method,
-
-                "success":
-                    False,
-
-                "failure_reason":
-                    str(e),
-
-                "processing_seconds":
-                    elapsed
-            }
+            # Must return a tuple of two values to match the unpacking in run_full_test
+            return (
+                { # Value 1: Result dictionary (Failure case)
+                    "capture": capture_name,
+                    "method": method,
+                    "success": False,
+                    "failure_reason": str(e),
+                    "processing_seconds": elapsed
+                }, 
+                [] # Value 2: Empty list for windows
+            )
 
     # ========================================================
     # RUN ALL METHODS / CAPTURES
@@ -1105,6 +1087,7 @@ class MultiCaptureValidator:
 
             for csi_path, gt_path in captures:
 
+                # The return structure is (result dict, windows list)
                 result, windows = (
                     self.validate_capture(
                         csi_path,
