@@ -84,8 +84,8 @@ FILTER_ORDER = 4
 # Number of quality-selected channels to fuse.
 TOP_N_CHANNELS = 5
 
-# Minimum GT beats required inside a window.
-MIN_GT_BEATS = 3
+# Minimum GT samples/beats required inside a window.
+MIN_GT_SAMPLES = 3
 
 # Maximum acceptable CSI BPM.
 MAX_BPM = 200.0
@@ -187,6 +187,55 @@ class MultiCaptureValidator:
             )
 
         return csi_data, timestamps, metadata
+
+
+    # ========================================================
+    # LOAD GROUND TRUTH (SUPPORTS BOTH FORMATS)
+    # ========================================================
+
+    def load_ground_truth(self, gt_path, gt_type="bpm_samples"):
+        """
+        Load ground truth data.
+
+        Supports two formats:
+            - "beats": CSV with 'ts' column (beat timestamps)
+            - "bpm_samples": CSV with 'ts' and 'bpm' columns (BPM samples)
+        """
+        gt_df = pd.read_csv(gt_path)
+
+        if "ts" not in gt_df.columns:
+            raise ValueError("Ground truth CSV has no 'ts' column.")
+
+        gt_times = (
+            pd.to_numeric(gt_df["ts"], errors="coerce")
+            .dropna()
+            .to_numpy(dtype=float)
+        )
+
+        gt_bpm = None
+
+        if gt_type == "bpm_samples":
+            if "bpm" not in gt_df.columns:
+                raise ValueError("BPM sample CSV has no 'bpm' column.")
+            gt_bpm = (
+                pd.to_numeric(gt_df["bpm"], errors="coerce")
+                .dropna()
+                .to_numpy(dtype=float)
+            )
+            # Ensure same length
+            min_len = min(len(gt_times), len(gt_bpm))
+            gt_times = gt_times[:min_len]
+            gt_bpm = gt_bpm[:min_len]
+        elif gt_type == "beats":
+            # Just timestamps, BPM will be calculated from RR intervals
+            pass
+        else:
+            raise ValueError(f"Unknown gt_type: {gt_type}")
+
+        if len(gt_times) < 2:
+            raise ValueError("Too few valid ground-truth samples.")
+
+        return gt_times, gt_bpm
 
 
     # ========================================================
@@ -526,7 +575,7 @@ class MultiCaptureValidator:
 
 
     # ========================================================
-    # GROUND TRUTH BPM
+    # GROUND TRUTH BPM (OLD FORMAT: BEAT TIMESTAMPS)
     # ========================================================
 
     def get_gt_bpm_for_window(
@@ -551,9 +600,9 @@ class MultiCaptureValidator:
 
         beats = gt_times[mask]
 
-        if len(beats) < MIN_GT_BEATS:
+        if len(beats) < MIN_GT_SAMPLES:
 
-            return None
+            return None, 0
 
         intervals = np.diff(beats)
 
@@ -563,15 +612,44 @@ class MultiCaptureValidator:
 
         if len(intervals) == 0:
 
-            return None
+            return None, 0
 
         mean_rr = np.mean(intervals)
 
         if mean_rr <= 0:
 
-            return None
+            return None, 0
 
-        return 60.0 / mean_rr
+        return 60.0 / mean_rr, len(beats)
+
+
+    # ========================================================
+    # GROUND TRUTH BPM (NEW FORMAT: BPM SAMPLES)
+    # ========================================================
+
+    def get_gt_bpm_from_samples(
+        self,
+        gt_times,
+        gt_bpm,
+        window_start,
+        window_end
+    ):
+        """
+        Calculate median GT BPM using BPM samples that fall
+        inside the CSI time window.
+        """
+        mask = (
+            (gt_times >= window_start)
+            &
+            (gt_times <= window_end)
+        )
+
+        bpms = gt_bpm[mask]
+
+        if len(bpms) < MIN_GT_SAMPLES:
+            return None, 0
+
+        return float(np.median(bpms)), len(bpms)
 
 
     # ========================================================
@@ -586,7 +664,9 @@ class MultiCaptureValidator:
         fs,
         method,
         capture_name,
-        segment_id
+        segment_id,
+        gt_bpm=None,
+        gt_type="beats",
     ):
         """
         Run sliding-window HR analysis on one continuous
@@ -688,14 +768,24 @@ class MultiCaptureValidator:
                 continue
 
             # Ground truth for same absolute time window.
+            if gt_type == "beats":
+                gt_bpm_val, n_samples = self.get_gt_bpm_for_window(
+                    gt_times,
+                    window_start,
+                    window_end
+                )
+            elif gt_type == "bpm_samples" and gt_bpm is not None:
+                gt_bpm_val, n_samples = self.get_gt_bpm_from_samples(
+                    gt_times,
+                    gt_bpm,
+                    window_start,
+                    window_end
+                )
+            else:
+                window_start += self.step_seconds
+                continue
 
-            gt_bpm = self.get_gt_bpm_for_window(
-                gt_times,
-                window_start,
-                window_end
-            )
-
-            if gt_bpm is None:
+            if gt_bpm_val is None:
 
                 window_start += (
                     self.step_seconds
@@ -703,7 +793,7 @@ class MultiCaptureValidator:
 
                 continue
 
-            error = csi_bpm - gt_bpm
+            error = csi_bpm - gt_bpm_val
 
             best_quality = (
                 quality.iloc[0]["quality_score"]
@@ -732,7 +822,7 @@ class MultiCaptureValidator:
                     csi_bpm,
 
                 "gt_bpm":
-                    gt_bpm,
+                    gt_bpm_val,
 
                 "error":
                     error,
@@ -750,8 +840,10 @@ class MultiCaptureValidator:
                     best_quality,
 
                 "top_channels":
-                    "; ".join(top_names)
+                    "; ".join(top_names),
 
+                "n_gt_samples":
+                    n_samples,
             }
 
             results.append(
@@ -773,11 +865,16 @@ class MultiCaptureValidator:
         self,
         csi_path,
         gt_path,
-        method
+        method,
+        gt_type="bpm_samples",
     ):
         """
         Validate one capture using one pipeline method.
         Returns (result_dict, list_of_windows) or (error_dict, []) on failure.
+        
+        Args:
+            gt_type: "beats" (RR intervals from beat timestamps) or 
+                    "bpm_samples" (direct BPM values from sensor)
         """
 
         capture_name = Path(
@@ -808,33 +905,13 @@ class MultiCaptureValidator:
             )
 
             # ------------------------------------------------
-            # Load GT
+            # Load GT (supports both formats)
             # ------------------------------------------------
 
-            gt_df = pd.read_csv(
-                gt_path
+            gt_times, gt_bpm = self.load_ground_truth(
+                gt_path,
+                gt_type=gt_type
             )
-
-            if "ts" not in gt_df.columns:
-
-                raise ValueError(
-                    "Ground truth CSV has no 'ts' column."
-                )
-
-            gt_times = (
-                pd.to_numeric(
-                    gt_df["ts"],
-                    errors="coerce"
-                )
-                .dropna()
-                .to_numpy(dtype=float)
-            )
-
-            if len(gt_times) < MIN_GT_BEATS:
-
-                raise ValueError(
-                    "Too few valid ground-truth beats."
-                )
 
             # ------------------------------------------------
             # Detect packet gaps
@@ -870,6 +947,10 @@ class MultiCaptureValidator:
             print(
                 f"    Continuous segments: "
                 f"{len(segments)}"
+            )
+
+            print(
+                f"    GT samples: {len(gt_times)}"
             )
 
             # ------------------------------------------------
@@ -931,7 +1012,9 @@ class MultiCaptureValidator:
                         normal_fs,
                         method,
                         capture_name,
-                        segment_id
+                        segment_id,
+                        gt_bpm=gt_bpm,
+                        gt_type=gt_type,
                     )
                 )
 
@@ -1063,7 +1146,10 @@ class MultiCaptureValidator:
                     gap_threshold * 1000.0,
 
                 "processing_seconds":
-                    elapsed
+                    elapsed,
+
+                "gt_type":
+                    gt_type,
             }
 
             print(
@@ -1091,14 +1177,14 @@ class MultiCaptureValidator:
                 f"    ERROR: {e}"
             )
 
-            # Must return a tuple of two values to match the unpacking in run_full_test
             return (
                 {
                     "capture": capture_name,
                     "method": method,
                     "success": False,
                     "failure_reason": str(e),
-                    "processing_seconds": elapsed
+                    "processing_seconds": elapsed,
+                    "gt_type": gt_type,
                 },
                 []
             )
@@ -1111,10 +1197,14 @@ class MultiCaptureValidator:
     def run_full_test(
         self,
         captures,
-        methods
+        methods,
+        gt_type="bpm_samples",  # Default to new format
     ):
         """
         Test every method against every capture.
+        
+        Args:
+            gt_type: "beats" or "bpm_samples" (can be overridden per capture)
         """
 
         print()
@@ -1141,7 +1231,8 @@ class MultiCaptureValidator:
                     self.validate_capture(
                         csi_path,
                         gt_path,
-                        method
+                        method,
+                        gt_type=gt_type
                     )
                 )
 
@@ -1202,6 +1293,24 @@ class MultiCaptureValidator:
                 self.window_results
             )
         )
+
+
+# ============================================================
+# AUTO-DETECT GT TYPE
+# ============================================================
+
+def detect_gt_type(gt_path):
+    """
+    Auto-detect whether ground truth CSV uses beat timestamps or BPM samples.
+    
+    Returns:
+        "beats" if only 'ts' column exists
+        "bpm_samples" if both 'ts' and 'bpm' columns exist
+    """
+    df = pd.read_csv(gt_path, nrows=1)
+    if "bpm" in df.columns:
+        return "bpm_samples"
+    return "beats"
 
 
 # ============================================================
@@ -1505,50 +1614,57 @@ def create_comparison_plot(
 # RUN TEST
 # ============================================================
 
-def run_test():
+def run_test(gt_type="bpm_samples"):
+    """
+    Run the multi-capture validation test.
+    
+    Args:
+        gt_type: "beats" (old format) or "bpm_samples" (new format)
+                 Set to "beats" for backward compatibility with old CSV files.
+    """
 
     # --------------------------------------------------------
     # CAPTURES
     # --------------------------------------------------------
 
     captures = [
+        #(
+        #    r"captures\Allen-N,0,1"
+        #    r"\csi_capture_20260820_133513.csv",
+        #    r"captures\Allen-N,0,1"
+        #    r"\ground_truth_20260820_133509.csv"
+        #),
+        #(
+        #    r"captures\Allen-N,0,-1"
+        #    r"\csi_capture_20260820_134305.csv",
+        #    r"captures\Allen-N,0,-1"
+        #    r"\ground_truth_20260820_134301.csv"
+        #),
+        #(
+        #    r"captures\Allen-S,0,0"
+        #    r"\csi_capture_20260820_134939.csv",
+        #    r"captures\Allen-S,0,0"
+        #    r"\ground_truth_20260820_134936.csv"
+        #),
+        #(
+        #    r"captures\Allen-S,0,1"
+        #    r"\csi_capture_20260820_135250.csv",
+        #    r"captures\Allen-S,0,1"
+        #    r"\ground_truth_20260820_135247.csv"
+        #),
+        #(
+        #    r"captures\Allen-S,0,-1"
+        #    r"\csi_capture_20260820_134631.csv",
+        #    r"captures\Allen-S,0,-1"
+        #    r"\ground_truth_20260820_134627.csv"
+        #),
+        #(
+        #    r"captures\Anusha1\csi_capture_20260818_190333.csv",
+        #    r"captures\Anusha1\ground_truth_20260818_190327.csv"
+        #),
         (
-            r"captures\Allen-N,0,1"
-            r"\csi_capture_20260820_133513.csv",
-            r"captures\Allen-N,0,1"
-            r"\ground_truth_20260820_133509.csv"
-        ),
-        (
-            r"captures\Allen-N,0,-1"
-            r"\csi_capture_20260820_134305.csv",
-            r"captures\Allen-N,0,-1"
-            r"\ground_truth_20260820_134301.csv"
-        ),
-        (
-            r"captures\Allen-S,0,0"
-            r"\csi_capture_20260820_134939.csv",
-            r"captures\Allen-S,0,0"
-            r"\ground_truth_20260820_134936.csv"
-        ),
-        (
-            r"captures\Allen-S,0,1"
-            r"\csi_capture_20260820_135250.csv",
-            r"captures\Allen-S,0,1"
-            r"\ground_truth_20260820_135247.csv"
-        ),
-        (
-            r"captures\Allen-S,0,-1"
-            r"\csi_capture_20260820_134631.csv",
-            r"captures\Allen-S,0,-1"
-            r"\ground_truth_20260820_134627.csv"
-        ),
-        (
-            r"captures\Anusha1\csi_capture_20260818_190333.csv",
-            r"captures\Anusha1\ground_truth_20260818_190327.csv"
-        ),
-        (
-            r"captures\mom\csi_capture_20260818_192310.csv",
-            r"captures\mom\ground_truth_20260818_192254.csv"
+            r"captures\04-09-2026\Allen-S,0,1\csi_capture_20260904_232607.csv",
+            r"captures\04-09-2026\Allen-S,0,1\ground_truth_20260904_232615.csv"
         ),
     ]
 
@@ -1561,7 +1677,7 @@ def run_test():
         "phase",
         "phase_common",
         "phase_diff",
-        "amplitude_phase",  # New hybrid method added here
+        "amplitude_phase",
     ]
 
     # --------------------------------------------------------
@@ -1573,7 +1689,8 @@ def run_test():
     results_df, window_df = (
         validator.run_full_test(
             captures,
-            methods
+            methods,
+            gt_type=gt_type
         )
     )
 
@@ -1703,6 +1820,7 @@ def run_test():
         "median_mae",
         "worst_mae",
         "correlation",
+        "gt_type",
         "failure_reason"
     ]
 
@@ -1733,4 +1851,6 @@ def run_test():
 
 if __name__ == "__main__":
 
-    results, windows, summary = run_test()
+    # By default, use the new BPM samples format.
+    # To use old format (beat timestamps), pass gt_type="beats"
+    results, windows, summary = run_test(gt_type="bpm_samples")

@@ -192,6 +192,32 @@ python combined_amplitude_phase_test_v2.py --position-optimization --positions "
 python combined_amplitude_phase_test_v2.py --position-optimization
 ```
 
+# 8. Multi capture validation V2
+
+```bash
+# Run all (its hard coded)
+python multi_capture_validation.py
+```
+
+### Add files to test
+
+```python
+# In the code, change:
+
+# CAPTURES
+        (
+            r"captures\04-09-2026\Allen-S,0,1\csi_capture_20260904_232607.csv",
+            r"captures\04-09-2026\Allen-S,0,1\ground_truth_20260904_232615.csv"
+        ),
+```
+
+### For Old Beat Timestamp CSVs
+
+```bash
+# In the code, change:
+results, windows, summary = run_test(gt_type="beats")
+```
+
 ## Key Parameters to Tune
 
 |Parameter|	Current|	Range to Try|	Rationale|
@@ -201,6 +227,17 @@ python combined_amplitude_phase_test_v2.py --position-optimization
 |Filter order|	3|	2-5|	Balance sharpness vs stability|
 |Peak detection threshold|	0.3 std|	0.2-0.6 std|	Adjust sensitivity|
 |Min beat distance|	300ms|	250-400ms|	Physiological range|
+
+`How to convert from frequency to Beats per minute.`
+
+0.8 Hz => 0.8 beats per second
+
+0.8 x 60 = 48 beats per minute
+
+ - 0.8 Hz = 48 bpm
+
+ - 2.5 Hz = 150 bpm
+
 
 ## Success Criteria
 
