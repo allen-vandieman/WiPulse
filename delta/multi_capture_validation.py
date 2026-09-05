@@ -1666,6 +1666,10 @@ def run_test(gt_type="bpm_samples"):
             r"captures\04-09-2026\Allen-S,0,1\csi_capture_20260904_232607.csv",
             r"captures\04-09-2026\Allen-S,0,1\ground_truth_20260904_232615.csv"
         ),
+        (
+            r"captures\05-09-2026\Allen-S,0,1\csi_capture_20260905_004623.csv",
+            r"captures\05-09-2026\Allen-S,0,1\ground_truth_20260905_004619.csv"
+        ),
     ]
 
     # --------------------------------------------------------
