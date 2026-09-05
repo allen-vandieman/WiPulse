@@ -4,7 +4,7 @@ WiPulse - Contactless Vital Sign Extraction
 
 1. [Setup](/setup/README.md)
 1. [Capture](/setup/CAPTURE.md)
-1. [Extraction App](/delta/README.md)
+1. [Extraction App](/echo/README.md)
 
 - plans
 
