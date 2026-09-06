@@ -602,9 +602,9 @@ class HeartRateEstimator:
             try:
                 signal = notch_filter(
                     signal,
-                    fs=fs,
-                    frequencies=self.notch_hz,
-                    q=30.0,
+                    notch_hz=self.notch_hz,
+                    fs_hz=fs,
+                    quality=30.0,
                 )
             except TypeError:
 
@@ -631,7 +631,7 @@ class HeartRateEstimator:
         try:
             signal = butterworth_bandpass(
                 signal,
-                fs=fs,
+                fs_hz=fs,
                 low_hz=self.low_hz,
                 high_hz=self.high_hz,
                 order=4,
@@ -643,9 +643,9 @@ class HeartRateEstimator:
             try:
                 signal = butterworth_bandpass(
                     signal,
-                    fs=fs,
-                    low=self.low_hz,
-                    high=self.high_hz,
+                    fs_hz=fs,
+                    low_hz=self.low_hz,
+                    high_hz=self.high_hz,
                     order=4,
                 )
             except Exception:
