@@ -51,6 +51,12 @@ heart_rate_fusion-bluetooth_V2
 # V3 including min/max
 heart_rate_fusion-bluetooth_V3
 
+# V4 miss-behaving SEN0203 sensor removed from validation
+heart_rate_fusion-bluetooth_V4
+
+# V5 Use LED Matrix to report Heartrate
+heart_rate_fusion-bluetooth_V5
+
 /LIBS
 |
 |-DFRobot_BloodOxygen_S

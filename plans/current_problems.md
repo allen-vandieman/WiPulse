@@ -1,5 +1,25 @@
 # Plan
 
+## Current live pipeline
+
+```
+add_frame()          rolling deque, kept by timestamp not packet count (window_seconds, default 30s)
+    |
+update()             triggered every update_seconds (2s), requires >=100 frames and >=60% of window filled
+    |
+_estimate_sample_rate()   median(dt) over all timestamps in window
+    |
+_clean_csi()          CSIFilter.clean_csi() -> detect DC/zero subcarriers, interpolate them
+    |
+_extract_best_signal() amplitude, keep subcarriers with finite mean>1e-9,
+                        normalize each by its own mean, take MEDIAN across subcarriers
+    |
+_process_signal()      Hampel -> (optional notch) -> Butterworth bandpass -> remove_dc_drift -> normalize
+    |
+_estimate_bpm()        Welch PSD (~8s segments), argmax in [low_hz, high_hz], bpm = peak_hz*60
+                        confidence = clip((peak_power/median_in-band_power - 1)/9 * 100, 0, 100)
+```
+
 ## Improvements needed
 
 ### 1. No quality-based channel selection — this is the biggest gap.
