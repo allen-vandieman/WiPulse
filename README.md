@@ -6,11 +6,15 @@ WiPulse - Contactless Vital Sign Extraction
 1. [Capture](/setup/CAPTURE.md)
 1. [Extraction App](/echo/README.md)
 
-- plans
+- Current Problems
 
-1. [HR Pipeline plan](plans/plan.md)
-1. [another Pipeline plan](/plans/another_plan.md)
-1. [rough Pipeline plan](/plans/rough.md)
+1. [Current Problems](/plans/current_problems.md)
+
+- Old Plans
+
+1. [HR Pipeline plan](/plans/old/plan.md)
+1. [another Pipeline plan](/plans/old/another_plan.md)
+1. [rough Pipeline plan](/plans/old/rough.md)
 
 ## Contents
 
