@@ -4,94 +4,41 @@
 live_monitor.py
 ===============
 
-Real-time terminal dashboard for Nexmon CSI streams.
+Real-time Nexmon CSI monitor with a separate heartbeat-processing path.
 
-In addition to packet statistics, amplitude/phase, motion score, and
-key-triggered CSI capture, this version estimates heart rate (BPM) from
-the live CSI stream with occupancy detection and motion scoring.
+Architecture
+------------
 
-Live heartbeat pipeline
------------------------
+                 ┌──────────────→ CSI CSV capture
+                 │
+UDP CSI
+   │
+   ↓
+decode
+   │
+   ↓
+LiveState / rolling buffer
+   │
+   └──────────────→ HeartbeatWorker
+                           │
+                           ↓
+                    run_live_analysis()
+                           │
+                           ↓
+                      HR result
+                           │
+                           ↓
+                       Dashboard
 
-    Raw complex CSI
-        |
-        v
-    Detect problematic subcarriers
-        |
-        v
-    Interpolate problematic subcarriers
-        |
-        v
-    Extract amplitude
-        |
-        v
-    Hampel filter
-        |
-        v
-    Optional notch filter
-        |
-        v
-    Heartbeat bandpass
-        |
-        v
-    Drift removal
-        |
-        v
-    Normalization
-        |
-        v
-    Welch PSD
-        |
-        v
-    Dominant heartbeat frequency
-        |
-        v
-    Estimated BPM
+IMPORTANT:
 
-OCCUPANCY AND MOTION DETECTION
-------------------------------
+The Scapy packet callback never performs heartbeat analysis.
 
-    Energy-based occupancy detection
-    Motion scoring with baseline adaptation
-    Signal quality assessment
-    Confidence-based BPM validation
+The heartbeat worker copies a rolling CSI window while holding the
+state lock and then releases the lock BEFORE doing any filtering,
+FFT/PSD, subcarrier selection, or other expensive processing.
 
-Usage
------
-
-    sudo python live_monitor.py --iface wlan0 --chip 43455c0 --bw 80
-
-Useful options:
-
-    --hr-window 30
-        Number of seconds of CSI used for each BPM estimate.
-
-    --hr-update 2
-        Recalculate BPM every N seconds.
-
-    --hr-low 0.7
-        Lower heartbeat frequency limit in Hz (42 BPM).
-
-    --hr-high 2.5
-        Upper heartbeat frequency limit in Hz (150 BPM).
-
-    --hr-hampel-window 51
-        Hampel window used by the heartbeat pipeline.
-
-    --hr-hampel-sigmas 3.0
-        Hampel threshold.
-
-    --hr-notch 0
-        Optional notch frequency in Hz. 0 disables notch filtering.
-
-    --motion-threshold 2.5
-        Motion score threshold (higher = less sensitive to motion).
-
-    --occupancy-threshold 0.05
-        Energy threshold for occupancy detection.
-
-Press 'q' to quit.
-Press 'c' to start/stop recording decoded CSI to a timestamped CSV.
+This prevents heartbeat processing from blocking packet reception.
 """
 
 from __future__ import annotations
@@ -117,35 +64,36 @@ from decoder import (
 
 from filters import (
     hampel_filter,
-    butterworth_bandpass,
-    notch_filter,
-    remove_dc_drift,
-    normalize_signal,
-    FilterConfig,
-    CSIFilter,
 )
 
-# Use the enhanced heartbeat extraction
-from heartbeat_extraction import HeartbeatExtractor, HeartbeatConfig
-
-try:
-    from scipy.signal import welch
-except ImportError:
-    welch = None
+from heartbeat_extraction import (
+    HeartbeatConfig,
+    HeartbeatExtractor,
+)
 
 
-logger = logging.getLogger("csi_analysis.live_monitor")
+# ======================================================================
+# LOGGING
+# ======================================================================
 
-SPARK_CHARS = "▁▂▃▄▅▆▇█"
+logger = logging.getLogger(
+    "csi_analysis.live_monitor"
+)
+
+SPARK_CHARS = (
+    "▁▂▃▄▅▆▇█"
+)
 
 
-# ---------------------------------------------------------------------------
+# ======================================================================
 # CSI CAPTURE
-# ---------------------------------------------------------------------------
+# ======================================================================
 
 class CSICapture:
     """
-    Handles writing live CSI frames to CSV, toggled on/off with the 'c' key.
+    Writes decoded CSI frames to CSV.
+
+    Disk I/O is completely independent from heartbeat processing.
     """
 
     def __init__(
@@ -155,19 +103,37 @@ class CSICapture:
         mode: str = "amplitude",
         flush_every: int = 20,
     ):
-        self.out_dir = out_dir
-        self.nfft = nfft
+
+        self.out_dir = Path(
+            out_dir
+        )
+
+        self.nfft = int(
+            nfft
+        )
+
         self.mode = mode
-        self.flush_every = max(1, flush_every)
+
+        self.flush_every = max(
+            1,
+            int(flush_every),
+        )
 
         self.lock = threading.Lock()
+
         self.file = None
         self.writer = None
-        self.path: Optional[Path] = None
+
+        self.path: Optional[
+            Path
+        ] = None
+
         self.n_written = 0
+
         self.active = False
 
     def _header(self):
+
         header = [
             "ts",
             "seq_num",
@@ -176,44 +142,69 @@ class CSICapture:
         ]
 
         if self.mode == "complex":
-            for i in range(self.nfft):
+
+            for i in range(
+                self.nfft
+            ):
+
                 header += [
                     f"sc{i}_re",
                     f"sc{i}_im",
                 ]
 
         else:
-            suffix = "amp" if self.mode == "amplitude" else "pha"
+
+            suffix = (
+                "amp"
+                if self.mode
+                == "amplitude"
+                else "pha"
+            )
+
             header += [
                 f"sc{i}_{suffix}"
-                for i in range(self.nfft)
+                for i in range(
+                    self.nfft
+                )
             ]
 
         return header
 
     def start(self) -> Path:
-        """Open a new timestamped CSV file and start writing."""
+
         with self.lock:
+
             if self.active:
                 return self.path
 
-            self.out_dir.mkdir(exist_ok=True)
+            self.out_dir.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
 
-            ts_tag = time.strftime("%Y%m%d_%H%M%S")
+            ts_tag = time.strftime(
+                "%Y%m%d_%H%M%S"
+            )
 
             self.path = (
-                self.out_dir /
-                f"csi_capture_{ts_tag}.csv"
+                self.out_dir
+                / f"csi_capture_{ts_tag}.csv"
             )
 
             self.file = open(
                 self.path,
                 "w",
                 newline="",
+                buffering=1,
             )
 
-            self.writer = csv.writer(self.file)
-            self.writer.writerow(self._header())
+            self.writer = csv.writer(
+                self.file
+            )
+
+            self.writer.writerow(
+                self._header()
+            )
 
             self.n_written = 0
             self.active = True
@@ -221,14 +212,16 @@ class CSICapture:
             return self.path
 
     def stop(self):
-        """Flush and close the current file."""
+
         with self.lock:
+
             if not self.active:
                 return
 
             self.active = False
 
             if self.file is not None:
+
                 self.file.flush()
                 self.file.close()
 
@@ -236,21 +229,35 @@ class CSICapture:
             self.writer = None
 
     def toggle(self):
+
         if self.active:
+
             self.stop()
             return False
 
         self.start()
         return True
 
-    def write_frame(self, frame):
-        """Write one decoded CSI frame as a CSV row."""
+    def write_frame(
+        self,
+        frame,
+    ):
+        """
+        Write one CSI frame.
+
+        This function only performs disk I/O if capture is active.
+        """
+
         with self.lock:
-            if not self.active or self.writer is None:
+
+            if (
+                not self.active
+                or self.writer is None
+            ):
                 return
 
             row = [
-                f"{frame.ts:.3f}",
+                f"{frame.ts:.6f}",
                 int(frame.seq_num),
                 int(frame.core),
                 int(frame.spatial_stream),
@@ -258,122 +265,262 @@ class CSICapture:
 
             if self.mode == "complex":
 
-                for v in frame.csi:
+                for value in frame.csi:
+
                     row += [
-                        v.real,
-                        v.imag,
+                        float(
+                            np.real(value)
+                        ),
+                        float(
+                            np.imag(value)
+                        ),
                     ]
 
             elif self.mode == "amplitude":
 
                 row += list(
-                    np.abs(frame.csi)
+                    np.abs(
+                        frame.csi
+                    )
                 )
 
             else:
 
                 row += list(
-                    np.angle(frame.csi)
+                    np.angle(
+                        frame.csi
+                    )
                 )
 
-            self.writer.writerow(row)
+            self.writer.writerow(
+                row
+            )
 
             self.n_written += 1
 
-            if self.n_written % self.flush_every == 0:
+            if (
+                self.n_written
+                % self.flush_every
+                == 0
+            ):
+
                 self.file.flush()
 
     def close(self):
         self.stop()
 
 
-# ---------------------------------------------------------------------------
-# DISPLAY HELPERS
-# ---------------------------------------------------------------------------
+# ======================================================================
+# DISPLAY
+# ======================================================================
 
-def sparkline(values, width: int = 40) -> str:
-    """ASCII/unicode sparkline, auto-scaled to min/max."""
-    values = list(values)[-width:]
+def sparkline(
+    values,
+    width: int = 40,
+) -> str:
+
+    values = list(values)[
+        -width:
+    ]
 
     if not values:
+
+        return " " * width
+
+    values = [
+        float(v)
+        for v in values
+        if np.isfinite(v)
+    ]
+
+    if not values:
+
         return " " * width
 
     lo = min(values)
     hi = max(values)
 
-    span = hi - lo if hi > lo else 1.0
+    span = (
+        hi - lo
+        if hi > lo
+        else 1.0
+    )
 
-    chars = [
-        SPARK_CHARS[
-            int(
-                (v - lo)
+    chars = []
+
+    for value in values:
+
+        idx = int(
+            (
+                (value - lo)
                 / span
-                * (len(SPARK_CHARS) - 1)
             )
-        ]
-        for v in values
-    ]
+            * (
+                len(
+                    SPARK_CHARS
+                )
+                - 1
+            )
+        )
 
-    return "".join(chars).rjust(width)
+        idx = max(
+            0,
+            min(
+                idx,
+                len(
+                    SPARK_CHARS
+                )
+                - 1,
+            ),
+        )
+
+        chars.append(
+            SPARK_CHARS[idx]
+        )
+
+    return "".join(
+        chars
+    ).rjust(width)
 
 
-# ---------------------------------------------------------------------------
+# ======================================================================
 # LIVE STATE
-# ---------------------------------------------------------------------------
+# ======================================================================
 
 class LiveState:
-    """Rolling buffers + counters updated from the sniff callback thread."""
+    """
+    Thread-safe live CSI state.
+
+    Packet callback:
+        update()
+
+    Dashboard:
+        snapshot_*()
+
+    Heartbeat worker:
+        get_heartbeat_window()
+    """
 
     def __init__(
         self,
         window: int,
-        capture: Optional[CSICapture] = None,
-        heartbeat_extractor: Optional[HeartbeatExtractor] = None,
+        buffer_seconds: float = 60.0,
+        capture: Optional[
+            CSICapture
+        ] = None,
     ):
-        self.window = window
+
+        self.window = max(
+            20,
+            int(window),
+        )
+
+        self.buffer_seconds = (
+            float(buffer_seconds)
+        )
+
+        # --------------------------------------------------------------
+        # Dashboard history
+        # --------------------------------------------------------------
 
         self.mean_amp_hist = deque(
-            maxlen=window
+            maxlen=self.window
         )
 
         self.per_sc_amp_hist = deque(
-            maxlen=window
+            maxlen=self.window
         )
+
+        # --------------------------------------------------------------
+        # Heartbeat rolling buffer
+        # --------------------------------------------------------------
+
+        self.csi_buffer = deque()
+
+        self.ts_buffer = deque()
+
+        # --------------------------------------------------------------
+        # Counters
+        # --------------------------------------------------------------
 
         self.n_seen = 0
         self.n_decoded = 0
         self.n_errors = 0
 
-        self.last_frame = None
-
-        self.start_time = time.time()
+        self.start_time = (
+            time.time()
+        )
 
         self.pkt_times = deque(
-            maxlen=50
+            maxlen=100
         )
+
+        self.last_frame = None
+
+        # --------------------------------------------------------------
+        # Lock
+        # --------------------------------------------------------------
 
         self.lock = threading.Lock()
 
         self.capture = capture
-        self.heartbeat_extractor = heartbeat_extractor
-        
-        # Buffer for rolling CSI data for heartbeat extraction
-        self.csi_buffer = []
-        self.ts_buffer = []
 
-    def update(self, frame):
+        # --------------------------------------------------------------
+        # Heartbeat result
+        # --------------------------------------------------------------
+
+        self.hr_result = {
+            "status": "waiting",
+            "bpm": None,
+            "candidate_bpm": None,
+            "confidence": 0.0,
+            "quality": 0.0,
+            "snr": 0.0,
+            "occupancy": False,
+            "motion": 0.0,
+            "motion_class": "unknown",
+            "sampling_rate": 0.0,
+            "selected_subcarriers": [],
+            "processing_samples": 0,
+        }
+
+        self.hr_result_time = 0.0
+
+        self.hr_processing = False
+
+        self.hr_processing_count = 0
+
+        self.hr_processing_time = 0.0
+
+    # ==================================================================
+    # PACKET UPDATE
+    # ==================================================================
+
+    def update(
+        self,
+        frame,
+    ):
+        """
+        Extremely lightweight packet callback.
+
+        NO heartbeat processing occurs here.
+        """
 
         amp = np.abs(
             frame.csi
         )
+
+        now = time.time()
+
+        # --------------------------------------------------------------
+        # State update
+        # --------------------------------------------------------------
 
         with self.lock:
 
             self.n_decoded += 1
 
             self.last_frame = frame
-
-            now = time.time()
 
             self.pkt_times.append(
                 now
@@ -388,35 +535,134 @@ class LiveState:
             self.per_sc_amp_hist.append(
                 amp
             )
-            
-            # Store CSI data for heartbeat extraction
-            self.csi_buffer.append(frame.csi)
-            self.ts_buffer.append(frame.ts)
-            
-            # Keep buffer within reasonable size
-            max_buffer = int(self.heartbeat_extractor.config.sampling_rate * 60) if self.heartbeat_extractor else 6000
-            if len(self.csi_buffer) > max_buffer:
-                self.csi_buffer = self.csi_buffer[-max_buffer:]
-                self.ts_buffer = self.ts_buffer[-max_buffer:]
 
-        # Heartbeat extraction is done separately
-        if self.heartbeat_extractor is not None:
-            # We'll process in batches to avoid overhead
-            pass
+            self.csi_buffer.append(
+                np.asarray(
+                    frame.csi,
+                    dtype=np.complex128,
+                ).copy()
+            )
 
-        # Outside the state lock so a slow disk write never blocks
-        # dashboard bookkeeping.
+            self.ts_buffer.append(
+                float(frame.ts)
+            )
+
+            # Keep approximately buffer_seconds.
+            while (
+                len(self.ts_buffer) > 2
+                and (
+                    self.ts_buffer[-1]
+                    - self.ts_buffer[0]
+                    > self.buffer_seconds
+                )
+            ):
+
+                self.ts_buffer.popleft()
+                self.csi_buffer.popleft()
+
+        # --------------------------------------------------------------
+        # Capture is outside the state lock.
+        # --------------------------------------------------------------
+
         if self.capture is not None:
+
             self.capture.write_frame(
                 frame
             )
 
-    @property
-    def live_rate(self) -> float:
+    # ==================================================================
+    # HEARTBEAT WINDOW
+    # ==================================================================
+
+    def get_heartbeat_window(
+        self,
+        seconds: float,
+    ):
+        """
+        Copy a rolling CSI window.
+
+        IMPORTANT:
+
+        Only the COPY happens while the lock is held.
+
+        Processing occurs after the lock is released.
+        """
+
+        required_seconds = (
+            float(seconds)
+        )
 
         with self.lock:
 
-            if len(self.pkt_times) < 2:
+            if len(
+                self.csi_buffer
+            ) < 10:
+
+                return (
+                    None,
+                    None,
+                )
+
+            timestamps = np.asarray(
+                self.ts_buffer,
+                dtype=np.float64,
+            )
+
+            csi = np.asarray(
+                self.csi_buffer,
+                dtype=np.complex128,
+            )
+
+        if len(timestamps) < 2:
+
+            return (
+                None,
+                None,
+            )
+
+        end_ts = (
+            timestamps[-1]
+        )
+
+        start_ts = (
+            end_ts
+            - required_seconds
+        )
+
+        indices = np.where(
+            timestamps
+            >= start_ts
+        )[0]
+
+        if len(indices) < 2:
+
+            return (
+                None,
+                None,
+            )
+
+        first = int(
+            indices[0]
+        )
+
+        return (
+            csi[first:].copy(),
+            timestamps[first:].copy(),
+        )
+
+    # ==================================================================
+    # SNAPSHOTS
+    # ==================================================================
+
+    @property
+    def live_rate(self):
+
+        with self.lock:
+
+            if len(
+                self.pkt_times
+            ) < 2:
+
                 return 0.0
 
             dt = (
@@ -424,14 +670,19 @@ class LiveState:
                 - self.pkt_times[0]
             )
 
-            return (
-                (len(self.pkt_times) - 1)
-                / dt
-                if dt > 0
-                else 0.0
-            )
+            if dt <= 0:
+                return 0.0
 
-    def motion_score(self) -> Optional[float]:
+            return (
+                len(
+                    self.pkt_times
+                )
+                - 1
+            ) / dt
+
+    def motion_score(
+        self,
+    ) -> Optional[float]:
 
         with self.lock:
 
@@ -441,6 +692,7 @@ class LiveState:
                 5,
                 self.window // 4,
             ):
+
                 return None
 
             stack = np.stack(
@@ -453,49 +705,311 @@ class LiveState:
             axis=0,
         )
 
-        mean_amp = np.mean(
-            stack
+        mean_amp = float(
+            np.mean(stack)
         )
 
-        return (
-            float(
-                np.mean(per_sc_std)
-                / mean_amp
+        if mean_amp <= 0:
+            return 0.0
+
+        return float(
+            np.mean(
+                per_sc_std
             )
-            if mean_amp > 0
-            else 0.0
+            / mean_amp
         )
 
+    def get_dashboard_snapshot(
+        self,
+    ):
 
-# ---------------------------------------------------------------------------
+        with self.lock:
+
+            result = dict(
+                self.hr_result
+            )
+
+            frame = (
+                self.last_frame
+            )
+
+            mean_hist = list(
+                self.mean_amp_hist
+            )
+
+            per_sc_hist = list(
+                self.per_sc_amp_hist
+            )
+
+            return {
+                "n_seen": self.n_seen,
+                "n_decoded": self.n_decoded,
+                "n_errors": self.n_errors,
+                "live_rate": self.live_rate,
+                "last_frame": frame,
+                "mean_amp_hist": mean_hist,
+                "per_sc_amp_hist": per_sc_hist,
+                "hr_result": result,
+                "hr_result_time": (
+                    self.hr_result_time
+                ),
+                "hr_processing": (
+                    self.hr_processing
+                ),
+                "hr_processing_count": (
+                    self.hr_processing_count
+                ),
+                "hr_processing_time": (
+                    self.hr_processing_time
+                ),
+            }
+
+
+# ======================================================================
+# HEARTBEAT WORKER
+# ======================================================================
+
+class HeartbeatWorker:
+    """
+    Dedicated heartbeat-processing thread.
+
+    The worker owns its HeartbeatExtractor.
+
+    The packet thread never touches this extractor.
+    """
+
+    def __init__(
+        self,
+        state: LiveState,
+        extractor: HeartbeatExtractor,
+        window_seconds: float,
+        update_seconds: float,
+    ):
+
+        self.state = state
+
+        self.extractor = (
+            extractor
+        )
+
+        self.window_seconds = (
+            float(window_seconds)
+        )
+
+        self.update_seconds = max(
+            0.25,
+            float(update_seconds),
+        )
+
+        self.stop_event = (
+            threading.Event()
+        )
+
+        self.wake_event = (
+            threading.Event()
+        )
+
+        self.thread = threading.Thread(
+            target=self._run,
+            name="heartbeat-worker",
+            daemon=True,
+        )
+
+    def start(self):
+        self.thread.start()
+
+    def stop(self):
+
+        self.stop_event.set()
+
+        self.wake_event.set()
+
+        if self.thread.is_alive():
+
+            self.thread.join(
+                timeout=3.0
+            )
+
+    def wake(self):
+
+        self.wake_event.set()
+
+    def _run(self):
+
+        next_run = time.monotonic()
+
+        while not self.stop_event.is_set():
+
+            now = time.monotonic()
+
+            wait_time = max(
+                0.0,
+                next_run - now,
+            )
+
+            self.wake_event.wait(
+                timeout=wait_time
+            )
+
+            self.wake_event.clear()
+
+            if self.stop_event.is_set():
+                break
+
+            next_run = (
+                time.monotonic()
+                + self.update_seconds
+            )
+
+            self.process_once()
+
+    def process_once(self):
+
+        (
+            csi,
+            timestamps,
+        ) = (
+            self.state
+            .get_heartbeat_window(
+                self.window_seconds
+            )
+        )
+
+        if csi is None:
+
+            return
+
+        # --------------------------------------------------------------
+        # Mark processing state.
+        # --------------------------------------------------------------
+
+        with self.state.lock:
+
+            self.state.hr_processing = True
+            self.state.hr_processing_count += 1
+
+        start = time.monotonic()
+
+        try:
+
+            result = (
+                self.extractor
+                .run_live_analysis(
+                    csi,
+                    timestamps,
+                )
+            )
+
+            elapsed = (
+                time.monotonic()
+                - start
+            )
+
+            with self.state.lock:
+
+                self.state.hr_result = (
+                    dict(result)
+                )
+
+                self.state.hr_result_time = (
+                    time.time()
+                )
+
+                self.state.hr_processing_time = (
+                    elapsed
+                )
+
+        except Exception as exc:
+
+            logger.exception(
+                "Heartbeat worker error: %s",
+                exc,
+            )
+
+            elapsed = (
+                time.monotonic()
+                - start
+            )
+
+            with self.state.lock:
+
+                previous = dict(
+                    self.state.hr_result
+                )
+
+                previous[
+                    "status"
+                ] = "processing_error"
+
+                previous[
+                    "error"
+                ] = str(exc)
+
+                self.state.hr_result = (
+                    previous
+                )
+
+                self.state.hr_result_time = (
+                    time.time()
+                )
+
+                self.state.hr_processing_time = (
+                    elapsed
+                )
+
+        finally:
+
+            with self.state.lock:
+
+                self.state.hr_processing = False
+
+
+# ======================================================================
 # SCAPY CALLBACK
-# ---------------------------------------------------------------------------
+# ======================================================================
 
 def make_sniff_callback(
     state: LiveState,
     args,
 ):
-    """Build the scapy sniff() callback."""
 
-    from scapy.all import UDP, IP
+    from scapy.all import (
+        UDP,
+        IP,
+    )
 
-    def handle_pkt(pkt):
+    def handle_pkt(
+        pkt,
+    ):
+
+        # --------------------------------------------------------------
+        # Packet count.
+        # --------------------------------------------------------------
 
         state.n_seen += 1
 
-        if not pkt.haslayer(UDP):
+        if not pkt.haslayer(
+            UDP
+        ):
             return
 
-        udp = pkt[UDP]
+        udp = pkt[
+            UDP
+        ]
 
-        if udp.dport != args.udp_port:
+        if (
+            udp.dport
+            != args.udp_port
+        ):
             return
 
         if (
             args.src_ip
             and pkt.haslayer(IP)
-            and pkt[IP].src != args.src_ip
+            and pkt[IP].src
+            != args.src_ip
         ):
+
             return
 
         payload = bytes(
@@ -505,35 +1019,58 @@ def make_sniff_callback(
         if not payload:
             return
 
+        # --------------------------------------------------------------
+        # Decode.
+        # --------------------------------------------------------------
+
         try:
 
-            frame = decode_frame_payload(
-                payload,
-                index=state.n_decoded,
-                ts=time.time(),
-                chip=args.chip,
-                bw=args.bw,
-                nfft_override=args.nfft,
-                header_format=args.header_format,
+            frame = (
+                decode_frame_payload(
+                    payload,
+                    index=state.n_decoded,
+                    ts=time.time(),
+                    chip=args.chip,
+                    bw=args.bw,
+                    nfft_override=args.nfft,
+                    header_format=args.header_format,
+                )
             )
 
         except DecodeError:
 
-            state.n_errors += 1
+            with state.lock:
+                state.n_errors += 1
+
             return
 
+        # --------------------------------------------------------------
+        # Core / stream filters.
+        # --------------------------------------------------------------
+
         if (
-            args.select_core is not None
-            and frame.core != args.select_core
+            args.select_core
+            is not None
+            and frame.core
+            != args.select_core
         ):
+
             return
 
         if (
-            args.select_stream is not None
+            args.select_stream
+            is not None
             and frame.spatial_stream
             != args.select_stream
         ):
+
             return
+
+        # --------------------------------------------------------------
+        # Update.
+        #
+        # This must stay cheap.
+        # --------------------------------------------------------------
 
         state.update(
             frame
@@ -542,23 +1079,37 @@ def make_sniff_callback(
     return handle_pkt
 
 
-# ---------------------------------------------------------------------------
-# CURSES DASHBOARD
-# ---------------------------------------------------------------------------
+# ======================================================================
+# DASHBOARD
+# ======================================================================
 
 def run_curses(
     stdscr,
     args,
 ):
 
-    curses.curs_set(0)
+    curses.curs_set(
+        0
+    )
 
-    stdscr.nodelay(True)
+    stdscr.nodelay(
+        True
+    )
+
+    # --------------------------------------------------------------
+    # NFFT
+    # --------------------------------------------------------------
 
     nfft = (
         args.nfft
-        or BW_TO_NFFT[args.bw]
+        or BW_TO_NFFT[
+            args.bw
+        ]
     )
+
+    # --------------------------------------------------------------
+    # Capture
+    # --------------------------------------------------------------
 
     capture = CSICapture(
         out_dir=args.output_dir,
@@ -566,41 +1117,114 @@ def run_curses(
         mode=args.capture_mode,
     )
 
-    # ============ Create heartbeat extractor with occupancy detection ============
-    hr_config = HeartbeatConfig()
-    hr_config.sampling_rate = 100.0
-    hr_config.bandpass_low = args.hr_low
-    hr_config.bandpass_high = args.hr_high
-    hr_config.filter_order = 4
-    hr_config.heart_rate_min = args.hr_low * 60
-    hr_config.heart_rate_max = args.hr_high * 60
-    hr_config.occupancy_energy_threshold = args.occupancy_threshold
-    hr_config.min_snr = args.min_snr
-    hr_config.max_hr_change = args.max_hr_change
-    hr_config.segment_duration = args.hr_window
-    
-    heartbeat_extractor = HeartbeatExtractor(hr_config)
+    # --------------------------------------------------------------
+    # Heartbeat configuration
+    # --------------------------------------------------------------
+
+    hr_config = (
+        HeartbeatConfig()
+    )
+
+    hr_config.bandpass_low = (
+        args.hr_low
+    )
+
+    hr_config.bandpass_high = (
+        args.hr_high
+    )
+
+    hr_config.heart_rate_min = (
+        args.hr_low * 60.0
+    )
+
+    hr_config.heart_rate_max = (
+        args.hr_high * 60.0
+    )
+
+    hr_config.filter_order = (
+        args.hr_filter_order
+    )
+
+    hr_config.live_window_seconds = (
+        args.hr_window
+    )
+
+    hr_config.live_update_seconds = (
+        args.hr_update
+    )
+
+    hr_config.live_max_subcarriers = (
+        args.hr_subcarriers
+    )
+
+    hr_config.auto_select_percentile = (
+        args.hr_percentile
+    )
+
+    hr_config.occupancy_energy_threshold = (
+        args.occupancy_threshold
+    )
+
+    hr_config.occupancy_diversity_threshold = (
+        args.occupancy_diversity
+    )
+
+    hr_config.min_snr = (
+        args.min_snr
+    )
+
+    hr_config.max_hr_change = (
+        args.max_hr_change
+    )
+
+    # --------------------------------------------------------------
+    # State
+    # --------------------------------------------------------------
 
     state = LiveState(
         window=args.window,
+        buffer_seconds=max(
+            60.0,
+            args.hr_window
+            + 10.0,
+        ),
         capture=capture,
-        heartbeat_extractor=heartbeat_extractor,
     )
 
-    baseline_motion = None
+    # --------------------------------------------------------------
+    # Dedicated heartbeat extractor.
+    # --------------------------------------------------------------
 
-    baseline_needed = (
-        args.baseline_window
-        or args.window
+    heartbeat_extractor = (
+        HeartbeatExtractor(
+            hr_config
+        )
     )
+
+    heartbeat_worker = (
+        HeartbeatWorker(
+            state=state,
+            extractor=heartbeat_extractor,
+            window_seconds=args.hr_window,
+            update_seconds=args.hr_update,
+        )
+    )
+
+    # --------------------------------------------------------------
+    # Sniffer.
+    # --------------------------------------------------------------
 
     from scapy.all import sniff
 
-    stop_flag = threading.Event()
+    stop_flag = (
+        threading.Event()
+    )
 
-    handle_pkt = make_sniff_callback(
-        state,
-        args,
+    handle_pkt = (
+        make_sniff_callback(
+            state,
+            args,
+        )
     )
 
     def sniff_thread():
@@ -609,7 +1233,10 @@ def run_curses(
 
             sniff(
                 iface=args.iface,
-                filter=f"udp port {args.udp_port}",
+                filter=(
+                    f"udp port "
+                    f"{args.udp_port}"
+                ),
                 prn=handle_pkt,
                 store=False,
                 stop_filter=lambda p:
@@ -618,7 +1245,8 @@ def run_curses(
 
         except PermissionError:
 
-            state.n_errors = -1
+            with state.lock:
+                state.n_errors = -1
 
         except Exception as exc:
 
@@ -627,18 +1255,33 @@ def run_curses(
                 exc,
             )
 
-            state.n_errors = -1
+            with state.lock:
+                state.n_errors = -1
 
-    t = threading.Thread(
+    sniffer = threading.Thread(
         target=sniff_thread,
+        name="csi-sniffer",
         daemon=True,
     )
 
-    t.start()
+    sniffer.start()
 
-    # Variables for periodic HR update
-    last_hr_update = 0
-    hr_update_interval = args.hr_update
+    # --------------------------------------------------------------
+    # Heartbeat worker.
+    # --------------------------------------------------------------
+
+    heartbeat_worker.start()
+
+    # --------------------------------------------------------------
+    # Dashboard.
+    # --------------------------------------------------------------
+
+    baseline_motion = None
+
+    baseline_needed = (
+        args.baseline_window
+        or args.window
+    )
 
     try:
 
@@ -646,217 +1289,462 @@ def run_curses(
 
             try:
 
-                ch = stdscr.getch()
+                ch = (
+                    stdscr.getch()
+                )
+
+                # --------------------------------------------------
+                # Quit
+                # --------------------------------------------------
 
                 if ch in (
                     ord("q"),
                     ord("Q"),
                 ):
+
                     break
+
+                # --------------------------------------------------
+                # Capture
+                # --------------------------------------------------
 
                 if ch in (
                     ord("c"),
                     ord("C"),
                 ):
+
                     capture.toggle()
 
-                if state.n_errors == -1:
+                # --------------------------------------------------
+                # Fatal sniffer error
+                # --------------------------------------------------
+
+                with state.lock:
+
+                    fatal_error = (
+                        state.n_errors
+                        == -1
+                    )
+
+                if fatal_error:
 
                     stdscr.erase()
 
                     stdscr.addstr(
                         0,
                         0,
-                        "Permission denied/opening interface failed.",
+                        "CSI SNIFFER ERROR",
                     )
 
                     stdscr.addstr(
-                        1,
+                        2,
                         0,
-                        "Try running with sudo.",
+                        "Permission denied "
+                        "or interface could "
+                        "not be opened.",
                     )
 
                     stdscr.addstr(
                         3,
                         0,
-                        "Press 'q' to quit.",
+                        "Try running with sudo.",
+                    )
+
+                    stdscr.addstr(
+                        5,
+                        0,
+                        "Press q to quit.",
                     )
 
                     stdscr.refresh()
 
-                    time.sleep(0.2)
+                    time.sleep(
+                        0.2
+                    )
 
                     continue
 
-                # ============ Update heartbeat extraction ============
-                now = time.time()
-                if now - last_hr_update >= hr_update_interval:
-                    last_hr_update = now
-                    
-                    with state.lock:
-                        if len(state.csi_buffer) > 100:
-                            # Convert buffer to numpy array
-                            csi_batch = np.stack(state.csi_buffer[-int(hr_config.sampling_rate * args.hr_window):], axis=0)
-                            
-                            # Run extraction
-                            try:
-                                hr_result = heartbeat_extractor.run_full_analysis(
-                                    csi_batch,
-                                    {'rate': hr_config.sampling_rate},
-                                    output_dir=args.output_dir / 'heartbeat_analysis'
-                                )
-                            except Exception as e:
-                                logger.debug(f"HR extraction error: {e}")
+                # --------------------------------------------------
+                # Snapshot state.
+                # --------------------------------------------------
 
-                # ------------------------------------------------------
-                # Dashboard
-                # ------------------------------------------------------
-
-                stdscr.erase()
-
-                h, w = stdscr.getmaxyx()
-
-                w = max(
-                    w,
-                    20,
+                snapshot = (
+                    state
+                    .get_dashboard_snapshot()
                 )
-
-                def put(row, text):
-
-                    if 0 <= row < h - 1:
-
-                        try:
-                            stdscr.addstr(
-                                row,
-                                0,
-                                text[: w - 1],
-                            )
-                        except curses.error:
-                            pass
 
                 elapsed = (
                     time.time()
                     - state.start_time
                 )
 
+                # --------------------------------------------------
+                # Draw.
+                # --------------------------------------------------
+
+                stdscr.erase()
+
+                h, w = (
+                    stdscr.getmaxyx()
+                )
+
+                w = max(
+                    w,
+                    20,
+                )
+
+                def put(
+                    row,
+                    text,
+                ):
+
+                    if (
+                        0
+                        <= row
+                        < h - 1
+                    ):
+
+                        try:
+
+                            stdscr.addstr(
+                                row,
+                                0,
+                                str(
+                                    text
+                                )[
+                                    :w - 1
+                                ],
+                            )
+
+                        except curses.error:
+
+                            pass
+
+                # --------------------------------------------------
+                # Header
+                # --------------------------------------------------
+
                 put(
                     0,
-                    f"csi_analysis live monitor -- "
-                    f"iface={args.iface} "
+                    "CSI-Heart LIVE MONITOR "
+                    f"-- iface={args.iface} "
                     f"chip={args.chip} "
                     f"bw={args.bw}MHz "
-                    f"port={args.udp_port} "
-                    f"[q quit, c capture]",
+                    f"port={args.udp_port}",
                 )
 
                 put(
                     1,
                     "-" * min(
                         w - 1,
-                        78,
+                        90,
                     ),
                 )
 
                 put(
                     2,
                     f"elapsed: {elapsed:6.1f}s   "
-                    f"seen: {state.n_seen:6d}   "
-                    f"decoded: {state.n_decoded:6d}   "
-                    f"errors: {max(state.n_errors, 0):4d}   "
-                    f"live rate: {state.live_rate:5.1f} pkt/s",
+                    f"seen: {snapshot['n_seen']:7d}   "
+                    f"decoded: {snapshot['n_decoded']:7d}   "
+                    f"errors: {max(snapshot['n_errors'], 0):4d}   "
+                    f"rate: {snapshot['live_rate']:6.2f} pkt/s",
                 )
 
-                # ------------------------------------------------------
-                # Capture status
-                # ------------------------------------------------------
+                # --------------------------------------------------
+                # Capture
+                # --------------------------------------------------
 
                 if capture.active:
 
-                    stdscr.attron(
-                        curses.A_BOLD
-                    )
-
                     put(
                         3,
-                        f"** CAPTURING ** -> "
+                        f"CAPTURING: "
                         f"{capture.path.name}   "
-                        f"frames written: "
-                        f"{capture.n_written}",
-                    )
-
-                    stdscr.attroff(
-                        curses.A_BOLD
+                        f"frames={capture.n_written}",
                     )
 
                 else:
-
-                    prev = (
-                        f" (last: {capture.path.name}, "
-                        f"{capture.n_written} frames)"
-                        if capture.path
-                        else ""
-                    )
 
                     put(
                         3,
-                        f"capture: OFF -- press 'c' "
-                        f"to start recording to "
-                        f"{capture.out_dir}/{prev}",
+                        "capture: OFF "
+                        "-- press 'c' to start",
                     )
 
-                # ============ Heart rate with occupancy ============
-                
-                # Get metrics from heartbeat extractor
-                occupancy = heartbeat_extractor.occupancy if hasattr(heartbeat_extractor, 'occupancy') else False
-                motion_level = heartbeat_extractor.motion_level if hasattr(heartbeat_extractor, 'motion_level') else 0
-                signal_quality = heartbeat_extractor.signal_quality if hasattr(heartbeat_extractor, 'signal_quality') else 0
-                hr = heartbeat_extractor.last_valid_bpm or 0
-                confidence = heartbeat_extractor.confidence if hasattr(heartbeat_extractor, 'confidence') else 0
-                
-                # Display occupancy status
-                occupancy_str = "OCCUPIED" if occupancy else "VACANT"
-                occupancy_color = curses.A_BOLD if occupancy else curses.A_NORMAL
-                stdscr.attron(occupancy_color)
-                put(5, f"OCCUPANCY: {occupancy_str}   motion: {motion_level:.3f}   quality: {signal_quality:.2f}")
-                stdscr.attroff(occupancy_color)
+                # --------------------------------------------------
+                # HR result
+                # --------------------------------------------------
 
-                # Display BPM
-                if occupancy and hr > 0 and signal_quality > args.min_snr:
-                    put(6, f"ESTIMATED BPM: {hr:6.1f} BPM    confidence: {confidence:5.1f}%")
-                    put(7, f"  heartbeat band: {args.hr_low:.2f}-{args.hr_high:.2f} Hz")
+                hr = snapshot[
+                    "hr_result"
+                ]
+
+                occupancy = bool(
+                    hr.get(
+                        "occupancy",
+                        False,
+                    )
+                )
+
+                motion = float(
+                    hr.get(
+                        "motion",
+                        0.0,
+                    )
+                )
+
+                motion_class = (
+                    hr.get(
+                        "motion_class",
+                        "unknown",
+                    )
+                )
+
+                quality = float(
+                    hr.get(
+                        "quality",
+                        0.0,
+                    )
+                )
+
+                confidence = float(
+                    hr.get(
+                        "confidence",
+                        0.0,
+                    )
+                )
+
+                bpm = hr.get(
+                    "bpm"
+                )
+
+                candidate = hr.get(
+                    "candidate_bpm"
+                )
+
+                sampling_rate = float(
+                    hr.get(
+                        "sampling_rate",
+                        0.0,
+                    )
+                )
+
+                status = hr.get(
+                    "status",
+                    "waiting",
+                )
+
+                selected = hr.get(
+                    "selected_subcarriers",
+                    [],
+                )
+
+                # --------------------------------------------------
+                # Occupancy
+                # --------------------------------------------------
+
+                occupancy_text = (
+                    "OCCUPIED"
+                    if occupancy
+                    else "VACANT"
+                )
+
+                put(
+                    5,
+                    f"OCCUPANCY: "
+                    f"{occupancy_text:<9} "
+                    f"motion={motion:6.3f} "
+                    f"({motion_class}) "
+                    f"quality={quality:5.2f}",
+                )
+
+                # --------------------------------------------------
+                # BPM
+                # --------------------------------------------------
+
+                if status == "valid" and bpm is not None:
+
+                    put(
+                        6,
+                        f"HEART RATE: "
+                        f"{float(bpm):6.1f} BPM   "
+                        f"confidence={confidence:5.1f}%   "
+                        f"status=VALID",
+                    )
+
+                elif (
+                    occupancy
+                    and bpm is not None
+                ):
+
+                    put(
+                        6,
+                        f"HEART RATE: "
+                        f"{float(bpm):6.1f} BPM   "
+                        f"confidence={confidence:5.1f}%   "
+                        f"status={status.upper()}",
+                    )
+
                 elif occupancy:
-                    put(6, f"ESTIMATED BPM: ---.- BPM  (signal quality too low)")
-                    put(7, f"  quality: {signal_quality:.2f}, need > {args.min_snr}")
+
+                    put(
+                        6,
+                        "HEART RATE: "
+                        "---.- BPM   "
+                        f"status={status.upper()}",
+                    )
+
                 else:
-                    put(6, f"ESTIMATED BPM: ---.- BPM  (no occupancy)")
-                    put(7, f"  waiting for subject to enter detection zone")
 
-                # Motion trend
-                if hasattr(heartbeat_extractor, 'get_motion_trend'):
-                    motion_trend = heartbeat_extractor.get_motion_trend(20)
-                    if len(motion_trend) > 5:
-                        put(8, f"motion trend: {sparkline(motion_trend, width=min(40, w-15))}")
+                    put(
+                        6,
+                        "HEART RATE: "
+                        "---.- BPM   "
+                        "status=NO OCCUPANCY",
+                    )
 
-                # ------------------------------------------------------
+                # --------------------------------------------------
+                # Candidate
+                # --------------------------------------------------
+
+                if candidate is not None:
+
+                    put(
+                        7,
+                        f"candidate: "
+                        f"{float(candidate):6.1f} BPM   "
+                        f"snr={float(hr.get('snr', 0.0)):5.2f}   "
+                        f"peak={float(hr.get('peak_freq', 0.0) or 0.0):.3f} Hz",
+                    )
+
+                else:
+
+                    put(
+                        7,
+                        f"heartbeat band: "
+                        f"{args.hr_low:.2f}-"
+                        f"{args.hr_high:.2f} Hz",
+                    )
+
+                # --------------------------------------------------
+                # Processing
+                # --------------------------------------------------
+
+                processing = snapshot[
+                    "hr_processing"
+                ]
+
+                process_time = snapshot[
+                    "hr_processing_time"
+                ]
+
+                if processing:
+
+                    put(
+                        8,
+                        "heartbeat worker: "
+                        "PROCESSING...",
+                    )
+
+                else:
+
+                    put(
+                        8,
+                        f"heartbeat worker: "
+                        f"idle   "
+                        f"last processing="
+                        f"{process_time:.3f}s   "
+                        f"fs={sampling_rate:.2f} Hz",
+                    )
+
+                # --------------------------------------------------
+                # Subcarriers
+                # --------------------------------------------------
+
+                if selected:
+
+                    selected_text = (
+                        ", ".join(
+                            str(x)
+                            for x in selected[:12]
+                        )
+                    )
+
+                    if len(selected) > 12:
+
+                        selected_text += (
+                            ", ..."
+                        )
+
+                    put(
+                        9,
+                        "selected SCs: "
+                        f"{selected_text}",
+                    )
+
+                else:
+
+                    put(
+                        9,
+                        "selected SCs: "
+                        "warming up...",
+                    )
+
+                # --------------------------------------------------
+                # Result age
+                # --------------------------------------------------
+
+                result_time = snapshot[
+                    "hr_result_time"
+                ]
+
+                if result_time > 0:
+
+                    age = (
+                        time.time()
+                        - result_time
+                    )
+
+                    put(
+                        10,
+                        f"HR result age: "
+                        f"{age:5.1f}s   "
+                        f"window={args.hr_window:.1f}s   "
+                        f"update={args.hr_update:.1f}s",
+                    )
+
+                else:
+
+                    put(
+                        10,
+                        "HR result age: "
+                        "waiting for first analysis...",
+                    )
+
+                # --------------------------------------------------
                 # Last packet
-                # ------------------------------------------------------
+                # --------------------------------------------------
 
-                frame = state.last_frame
+                frame = snapshot[
+                    "last_frame"
+                ]
 
                 if frame is not None:
 
-                    rssi_str = (
+                    rssi = (
                         f"{frame.rssi} dBm"
-                        if frame.rssi is not None
+                        if frame.rssi
+                        is not None
                         else "n/a"
                     )
 
-                    put(10,
-                        f"last packet -- "
-                        f"seq={frame.seq_num:5d}  "
-                        f"core={frame.core}  "
-                        f"stream={frame.spatial_stream}  "
-                        f"rssi={rssi_str}  "
+                    put(
+                        12,
+                        f"last packet: "
+                        f"seq={frame.seq_num:6d} "
+                        f"core={frame.core} "
+                        f"stream={frame.spatial_stream} "
+                        f"RSSI={rssi} "
                         f"chanspec=0x{frame.chanspec:04x}",
                     )
 
@@ -864,35 +1752,40 @@ def run_curses(
                         frame.csi
                     )
 
-                    ph = np.angle(
+                    phase = np.angle(
                         frame.csi,
                         deg=True,
                     )
 
-                    put(12,
-                        f"current mean amplitude: "
-                        f"{float(np.mean(amp)):10.2f}",
+                    put(
+                        14,
+                        f"mean amplitude: "
+                        f"{float(np.mean(amp)):10.3f}",
                     )
 
-                    put(13,
-                        f"current mean phase:     "
-                        f"{float(np.mean(ph)):10.2f} deg",
+                    put(
+                        15,
+                        f"mean phase:     "
+                        f"{float(np.mean(phase)):10.3f} deg",
                     )
 
                     # --------------------------------------------------
-                    # Raw amplitude trend
+                    # Amplitude trend
                     # --------------------------------------------------
 
-                    put(15,
-                        f"amplitude trend "
-                        f"(last {len(state.mean_amp_hist)} pkts, raw):",
+                    put(
+                        17,
+                        "amplitude trend:",
                     )
 
-                    put(16,
+                    put(
+                        18,
                         sparkline(
-                            state.mean_amp_hist,
+                            snapshot[
+                                "mean_amp_hist"
+                            ],
                             width=min(
-                                60,
+                                70,
                                 w - 2,
                             ),
                         ),
@@ -904,23 +1797,25 @@ def run_curses(
 
                     if args.hampel:
 
-                        put(17,
-                            f"amplitude trend "
-                            f"(Hampel window="
-                            f"{args.hampel_window}, "
-                            f"sigmas="
-                            f"{args.hampel_sigmas}):",
+                        put(
+                            20,
+                            f"Hampel amplitude "
+                            f"trend "
+                            f"(window={args.hampel_window}, "
+                            f"sigmas={args.hampel_sigmas}):",
                         )
 
-                        if len(
-                            state.mean_amp_hist
-                        ) >= 5:
+                        hist = snapshot[
+                            "mean_amp_hist"
+                        ]
 
-                            filtered_hist = (
+                        if len(hist) >= 5:
+
+                            filtered = (
                                 hampel_filter(
-                                    np.array(
-                                        state.mean_amp_hist,
-                                        dtype=np.float64,
+                                    np.asarray(
+                                        hist,
+                                        dtype=float,
                                     ),
                                     window_size=(
                                         args.hampel_window
@@ -931,11 +1826,12 @@ def run_curses(
                                 )
                             )
 
-                            put(18,
+                            put(
+                                21,
                                 sparkline(
-                                    filtered_hist,
+                                    filtered,
                                     width=min(
-                                        60,
+                                        70,
                                         w - 2,
                                     ),
                                 ),
@@ -943,49 +1839,61 @@ def run_curses(
 
                         else:
 
-                            put(18,
-                                "(warming up...)",
+                            put(
+                                21,
+                                "warming up...",
                             )
 
                     # --------------------------------------------------
-                    # Subcarrier profile
+                    # Current subcarrier profile
                     # --------------------------------------------------
 
-                    put(20,
-                        "current subcarrier profile "
-                        "(this packet):",
+                    put(
+                        23,
+                        "current subcarrier "
+                        "amplitude profile:",
                     )
 
-                    put(21,
+                    put(
+                        24,
                         sparkline(
-                            np.fft.fftshift(amp),
+                            np.fft.fftshift(
+                                amp
+                            ),
                             width=min(
-                                60,
+                                70,
                                 w - 2,
                             ),
                         ),
                     )
 
                     # --------------------------------------------------
-                    # Motion score
+                    # Legacy motion score
                     # --------------------------------------------------
 
-                    ms = state.motion_score()
+                    ms = (
+                        state.motion_score()
+                    )
 
                     if ms is not None:
 
                         if (
-                            baseline_motion is None
+                            baseline_motion
+                            is None
                             and len(
-                                state.mean_amp_hist
-                            ) >= baseline_needed
+                                snapshot[
+                                    "mean_amp_hist"
+                                ]
+                            )
+                            >= baseline_needed
                         ):
+
                             baseline_motion = ms
 
-                        put(23,
-                            f"motion score "
-                            f"(rolling {args.window}-pkt "
-                            f"window): {ms:.5f}",
+                        put(
+                            26,
+                            f"legacy motion score: "
+                            f"{ms:.5f}",
                         )
 
                         if baseline_motion:
@@ -993,13 +1901,15 @@ def run_curses(
                             ratio = (
                                 ms
                                 / baseline_motion
-                                if baseline_motion > 0
+                                if baseline_motion
+                                > 0
                                 else 0
                             )
 
-                            put(24,
-                                f"  vs baseline: "
-                                f"{ratio:5.2f}x",
+                            put(
+                                27,
+                                f"baseline ratio: "
+                                f"{ratio:.2f}x",
                             )
 
                             if (
@@ -1007,119 +1917,138 @@ def run_curses(
                                 > args.motion_threshold
                             ):
 
-                                stdscr.attron(
-                                    curses.A_BOLD
-                                )
-
-                                put(25,
-                                    "** MOTION / CHANGE "
-                                    "DETECTED **",
-                                )
-
-                                stdscr.attroff(
-                                    curses.A_BOLD
+                                put(
+                                    28,
+                                    "MOTION / CHANGE "
+                                    "DETECTED",
                                 )
 
                     else:
 
-                        put(23,
-                            f"motion score: "
-                            f"(warming up, need "
-                            f"{baseline_needed} packets)",
+                        put(
+                            26,
+                            "legacy motion score: "
+                            "warming up...",
                         )
 
                 else:
 
-                    put(9,
-                        "waiting for first CSI packet... "
-                        "(check --iface / --src-ip / "
-                        "that the sender is actually running)",
+                    put(
+                        12,
+                        "waiting for first CSI "
+                        "packet...",
                     )
+
+                # --------------------------------------------------
+                # Footer
+                # --------------------------------------------------
+
+                put(
+                    h - 2,
+                    "[q] quit   "
+                    "[c] capture   "
+                    "CSI reception and heartbeat "
+                    "processing are independent",
+                )
 
                 stdscr.refresh()
 
                 time.sleep(
                     max(
-                        0.0,
-                        1.0 / args.refresh_hz,
+                        0.01,
+                        1.0
+                        / args.refresh_hz,
                     )
                 )
 
             except KeyboardInterrupt:
+
                 break
 
     finally:
 
         stop_flag.set()
 
+        heartbeat_worker.stop()
+
         capture.close()
 
 
-# ---------------------------------------------------------------------------
+# ======================================================================
 # MAIN
-# ---------------------------------------------------------------------------
+# ======================================================================
 
-def main(argv=None):
+def main(
+    argv=None,
+):
 
-    p = argparse.ArgumentParser(
+    parser = argparse.ArgumentParser(
         description=(
-            "Live terminal dashboard for Nexmon CSI "
-            "streams with real-time BPM estimation."
+            "CSI-Heart live Nexmon CSI "
+            "monitor with isolated heartbeat "
+            "processing."
         ),
         formatter_class=(
             argparse.ArgumentDefaultsHelpFormatter
         ),
     )
 
-    # --------------------------------------------------------------
-    # CSI / network options
-    # --------------------------------------------------------------
+    # ==================================================================
+    # CSI
+    # ==================================================================
 
-    p.add_argument(
+    parser.add_argument(
         "--iface",
         required=True,
-        help="Interface to sniff on (e.g. wlan0)",
+        help=(
+            "Interface to sniff on "
+            "(e.g. wlan0)"
+        ),
     )
 
-    p.add_argument(
+    parser.add_argument(
         "--chip",
         default="43455c0",
-        choices=list(CHIP_TABLE),
+        choices=list(
+            CHIP_TABLE
+        ),
     )
 
-    p.add_argument(
+    parser.add_argument(
         "--bw",
         type=int,
         default=80,
-        choices=list(BW_TO_NFFT),
+        choices=list(
+            BW_TO_NFFT
+        ),
     )
 
-    p.add_argument(
+    parser.add_argument(
         "--nfft",
         type=int,
         default=None,
         help=(
-            "Override nfft instead of deriving "
-            "from --bw"
+            "Override NFFT instead of "
+            "deriving it from bandwidth."
         ),
     )
 
-    p.add_argument(
+    parser.add_argument(
         "--udp-port",
         type=int,
         default=5500,
     )
 
-    p.add_argument(
+    parser.add_argument(
         "--src-ip",
         default="10.10.10.10",
         help=(
-            "Expected CSI source IP; "
-            "pass '' to disable"
+            "Expected CSI source IP. "
+            "Use '' to disable."
         ),
     )
 
-    p.add_argument(
+    parser.add_argument(
         "--header-format",
         default="auto",
         choices=[
@@ -1129,240 +2058,226 @@ def main(argv=None):
         ],
     )
 
-    p.add_argument(
+    parser.add_argument(
         "--select-core",
         type=int,
         default=None,
-        help=(
-            "Only show packets from this core"
-        ),
     )
 
-    p.add_argument(
+    parser.add_argument(
         "--select-stream",
         type=int,
         default=None,
-        help=(
-            "Only show packets from this spatial stream"
-        ),
     )
 
-    # --------------------------------------------------------------
-    # Motion monitoring
-    # --------------------------------------------------------------
+    # ==================================================================
+    # GENERAL MONITORING
+    # ==================================================================
 
-    p.add_argument(
+    parser.add_argument(
         "--window",
         type=int,
         default=100,
         help=(
-            "Rolling window size in packets "
-            "for motion score"
+            "Rolling packet window used "
+            "by dashboard motion monitoring."
         ),
     )
 
-    p.add_argument(
+    parser.add_argument(
+        "--refresh-hz",
+        type=float,
+        default=10.0,
+        help=(
+            "Dashboard redraw rate."
+        ),
+    )
+
+    parser.add_argument(
         "--hampel",
         action="store_true",
         help=(
-            "Show a Hampel-filtered amplitude "
-            "trend alongside the raw one"
+            "Show Hampel-filtered amplitude "
+            "trend."
         ),
     )
 
-    p.add_argument(
+    parser.add_argument(
         "--hampel-window",
         type=int,
         default=7,
-        help=(
-            "Hampel filter window for dashboard "
-            "trend"
-        ),
     )
 
-    p.add_argument(
+    parser.add_argument(
         "--hampel-sigmas",
         type=float,
         default=3.0,
-        help=(
-            "Hampel outlier threshold for "
-            "dashboard trend"
-        ),
     )
 
-    p.add_argument(
+    parser.add_argument(
         "--baseline-window",
         type=int,
         default=None,
-        help=(
-            "Packets to average for motion-score "
-            "baseline"
-        ),
     )
 
-    p.add_argument(
+    parser.add_argument(
         "--motion-threshold",
         type=float,
         default=1.5,
-        help=(
-            "Motion-score ratio that triggers "
-            "the alert"
-        ),
     )
 
-    # --------------------------------------------------------------
-    # HEART RATE OPTIONS
-    # --------------------------------------------------------------
+    # ==================================================================
+    # HEARTBEAT
+    # ==================================================================
 
-    p.add_argument(
+    parser.add_argument(
         "--hr-window",
         type=float,
         default=30.0,
         help=(
             "Seconds of CSI used for each "
-            "heart-rate estimate"
+            "live HR estimate."
         ),
     )
 
-    p.add_argument(
+    parser.add_argument(
         "--hr-update",
         type=float,
         default=2.0,
         help=(
-            "Seconds between heart-rate "
-            "recalculations"
+            "Seconds between live HR "
+            "estimates."
         ),
     )
 
-    p.add_argument(
+    parser.add_argument(
         "--hr-low",
         type=float,
         default=0.7,
         help=(
-            "Lower heartbeat frequency limit "
-            "in Hz (42 BPM)"
+            "Lower heartbeat frequency "
+            "limit in Hz."
         ),
     )
 
-    p.add_argument(
+    parser.add_argument(
         "--hr-high",
         type=float,
         default=2.5,
         help=(
-            "Upper heartbeat frequency limit "
-            "in Hz (150 BPM)"
+            "Upper heartbeat frequency "
+            "limit in Hz."
         ),
     )
 
-    p.add_argument(
-        "--hr-hampel-window",
+    parser.add_argument(
+        "--hr-filter-order",
         type=int,
-        default=51,
+        default=4,
         help=(
-            "Hampel window used by heartbeat "
-            "pipeline"
+            "Butterworth heartbeat "
+            "filter order."
         ),
     )
 
-    p.add_argument(
-        "--hr-hampel-sigmas",
-        type=float,
-        default=3.0,
-        help=(
-            "Hampel threshold used by heartbeat "
-            "pipeline"
-        ),
-    )
-
-    p.add_argument(
-        "--hr-notch",
-        type=float,
-        default=0.0,
-        help=(
-            "Optional narrowband interference "
-            "frequency in Hz; 0 disables notch"
-        ),
-    )
-
-    p.add_argument(
-        "--hr-drift-window",
+    parser.add_argument(
+        "--hr-subcarriers",
         type=int,
-        default=21,
+        default=12,
         help=(
-            "Moving-average drift-removal window"
+            "Maximum number of subcarriers "
+            "used for live heartbeat fusion."
         ),
     )
 
-    # ============ NEW: OCCUPANCY AND MOTION OPTIONS ============
-    
-    p.add_argument(
+    parser.add_argument(
+        "--hr-percentile",
+        type=float,
+        default=20.0,
+        help=(
+            "Percentage of subcarriers "
+            "eligible for live selection "
+            "before the hard maximum."
+        ),
+    )
+
+    parser.add_argument(
         "--occupancy-threshold",
         type=float,
         default=0.05,
         help=(
-            "Energy threshold for occupancy detection "
-            "(lower = more sensitive)"
+            "Energy threshold for "
+            "occupancy detection."
         ),
     )
 
-    p.add_argument(
+    parser.add_argument(
+        "--occupancy-diversity",
+        type=float,
+        default=0.005,
+        help=(
+            "Subcarrier diversity threshold "
+            "for occupancy detection."
+        ),
+    )
+
+    parser.add_argument(
         "--min-snr",
         type=float,
         default=1.5,
         help=(
-            "Minimum SNR for valid BPM estimate "
-            "(higher = more conservative)"
+            "Minimum PSD SNR for accepting "
+            "a heartbeat candidate."
         ),
     )
 
-    p.add_argument(
+    parser.add_argument(
         "--max-hr-change",
         type=float,
-        default=30.0,
+        default=25.0,
         help=(
-            "Maximum BPM change between estimates "
-            "(higher = more responsive)"
+            "Maximum BPM jump before a "
+            "candidate is treated as unstable."
         ),
     )
 
-    # --------------------------------------------------------------
-    # Dashboard
-    # --------------------------------------------------------------
+    # ==================================================================
+    # OUTPUT
+    # ==================================================================
 
-    p.add_argument(
-        "--refresh-hz",
-        type=float,
-        default=10.0,
-        help="Dashboard redraw rate",
-    )
-
-    p.add_argument(
+    parser.add_argument(
         "--output-dir",
         type=str,
         default=None,
         help=(
-            "Directory for keypress-triggered "
-            "CSI captures"
+            "Directory for CSI captures."
         ),
     )
 
-    p.add_argument(
+    parser.add_argument(
         "--capture-mode",
         choices=[
             "complex",
             "amplitude",
             "phase",
         ],
-        default="amplitude",
+        default="complex",
         help=(
-            "Representation written per "
-            "subcarrier when capturing"
+            "Representation stored by CSI "
+            "capture. Complex is recommended "
+            "for later heartbeat analysis."
         ),
     )
 
-    args = p.parse_args(argv)
+    args = parser.parse_args(
+        argv
+    )
 
-    if not args.src_ip:
+    # ==================================================================
+    # VALIDATION
+    # ==================================================================
+
+    if args.src_ip == "":
         args.src_ip = None
 
     if (
@@ -1370,42 +2285,73 @@ def main(argv=None):
     ) != (
         args.select_stream is None
     ):
-        p.error(
+
+        parser.error(
             "--select-core and "
             "--select-stream must be "
-            "given together"
+            "specified together."
         )
 
     if args.hr_low <= 0:
-        p.error(
-            "--hr-low must be greater than 0"
+
+        parser.error(
+            "--hr-low must be > 0."
         )
 
-    if args.hr_high <= args.hr_low:
-        p.error(
-            "--hr-high must be greater than "
-            "--hr-low"
+    if (
+        args.hr_high
+        <= args.hr_low
+    ):
+
+        parser.error(
+            "--hr-high must be greater "
+            "than --hr-low."
         )
 
     if args.hr_window < 10:
-        p.error(
-            "--hr-window should be at least "
-            "10 seconds"
+
+        parser.error(
+            "--hr-window should be at "
+            "least 10 seconds."
         )
 
     if args.hr_update <= 0:
-        p.error(
-            "--hr-update must be greater than 0"
+
+        parser.error(
+            "--hr-update must be > 0."
+        )
+
+    if args.hr_subcarriers < 1:
+
+        parser.error(
+            "--hr-subcarriers must be >= 1."
+        )
+
+    if not (
+        0 < args.hr_percentile <= 100
+    ):
+
+        parser.error(
+            "--hr-percentile must be "
+            "between 0 and 100."
         )
 
     args.output_dir = (
-        Path(args.output_dir)
+        Path(
+            args.output_dir
+        )
         if args.output_dir
         else (
-            Path(__file__).resolve().parent
+            Path(__file__)
+            .resolve()
+            .parent
             / "output"
         )
     )
+
+    # ==================================================================
+    # RUN
+    # ==================================================================
 
     curses.wrapper(
         run_curses,
@@ -1414,4 +2360,5 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+
     main()

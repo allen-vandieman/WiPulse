@@ -17,14 +17,17 @@ project/
 ## Running the Live Monitor
 
 ```bash
-sudo python live_monitor.py \
+sudo python3 live_monitor.py \
     --iface wlan0 \
     --chip 43455c0 \
     --bw 80 \
-    --capture-mode complex \
-    --occupancy-threshold 0.05 \
-    --min-snr 1.5 \
-    --max-hr-change 30.0
+    --hr-window 30 \
+    --hr-update 2 \
+    --hr-low 0.7 \
+    --hr-high 2.5 \
+    --hr-subcarriers 12 \
+    --hr-percentile 20 \
+    --capture-mode complex
 ```
 
 ## Live Monitor 

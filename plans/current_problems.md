@@ -56,7 +56,7 @@ Live only ever uses amplitude. Your validation framework tests phase, phase_comm
 
 If you want, I can draft the concrete patch for #1 (quality-scored top-N fusion) since that's the change most likely to actually move your accuracy numbers — it's a fairly direct port of `HeartbeatPipeline` into the live class.
 
-## Improvements needed V2
+## Improvements needed V2 (Antie Cluadia)
 
 ### Critical: the lock held during heavy work
 
@@ -113,3 +113,331 @@ It's designed as an offline/batch analysis function (plots, spectrograms, text s
  - `confidence = fft_peak_confidence * quality_metrics['quality']` combines two independently-noisy 0-1(ish) scores multiplicatively, which tends to bias the combined confidence low. Worth checking empirically whether this matches how "confident" the numbers actually feel.
 
  - Exceptions in the live HR path are swallowed with `logger.debug` only — if extraction silently starts failing (e.g. a shape mismatch), the dashboard just keeps showing the last cached BPM forever with no visible indication something broke.
+
+ ## Improvements needed V3 (Uncle C)
+
+ ### There is a serious problem in `live_monitor.py`
+
+```python
+with state.lock:
+    if len(state.csi_buffer) > 100:
+        csi_batch = np.stack(...)
+        
+        try:
+            hr_result = heartbeat_extractor.run_full_analysis(...)
+```
+
+The entire heartbeat analysis is being performed while state.lock is held.
+
+That's bad for your particular setup.
+
+`run_full_analysis()` isn't a tiny operation. It does:
+
+1. occupancy detection
+1. subcarrier selection
+1. bandpass filtering
+1. quality assessment
+1. FFT
+1. spectrogram
+1. peak detection
+1. plotting
+1. saving results
+
+The extractor's `run_full_analysis()` actually generates visualizations and saves results.
+
+Meanwhile, your packet callback also needs `state.lock` to add each incoming CSI frame to the buffer.
+
+So you effectively have:
+
+```
+CSI packet arrives
+       ↓
+needs state.lock
+       ↓
+        X
+       ↓
+heartbeat analysis is holding lock
+       ↓
+filtering / FFT / plotting / saving
+       ↓
+packet waits
+       ↓
+more packet loss
+```
+
+Given that **packet loss has already been one of your biggest problems**, I would absolutely fix this.
+
+### Even worse: you're doing plotting during live monitoring
+
+For live monitoring, you don't want:
+
+```python
+run_full_analysis()
+```
+
+every two seconds.
+
+Because run_full_analysis() is intended as an **offline analysis pipeline**.
+
+It creates plots and saves analysis output every time.
+
+For your live system you really want something more like:
+
+```
+CSI packets
+    ↓
+rolling buffer
+    ↓
+heartbeat processing
+    ↓
+BPM
+    ↓
+quality/confidence
+    ↓
+dashboard
+```
+
+while the expensive visualization pipeline runs only when you explicitly request it.
+
+### Another important issue: your sampling rate
+
+Your monitor explicitly sets:
+
+```python
+hr_config.sampling_rate = 100.0
+```
+
+But your actual CSI stream has previously been around **97 Hz** in your captures.
+
+Your offline loader calculates the actual rate from timestamps.
+
+For example, you've previously been getting approximately:
+
+```
+97.3 Hz
+```
+
+So the live monitor should ideally estimate:
+
+```
+actual CSI packet rate
+```
+
+and use that for the heartbeat processing.
+
+Otherwise:
+
+```
+actual: 97.3 Hz
+assumed: 100 Hz
+```
+
+causes a small frequency-to-BPM scaling error.
+
+For example, if the real heartbeat is 1.2 Hz:
+
+```
+1.2 × 60 = 72 BPM
+```
+
+but if your processing assumes the wrong time scale, the resulting BPM can be biased.
+
+This is not necessarily the biggest error in your system, but it's unnecessary.
+
+### I am also not fully convinced by the occupancy algorithm
+
+This is the weakest part of the new heartbeat extractor.
+
+You're calculating:
+
+```
+energy = mean(amps ** 2) / max(amps ** 2)
+```
+
+and then requiring:
+
+```
+energy OK
++
+subcarrier diversity OK
++
+motion ratio > 1.2
+```
+
+for occupancy.
+
+The problem is this:
+
+### A person sitting still may not satisfy the motion requirement.
+
+Your occupancy decision effectively requires the CSI to be sufficiently dynamic.
+
+But your actual use case is:
+
+ - person sitting relatively still while their heartbeat causes small CSI variations.
+
+So:
+
+```
+person sitting still
+       ↓
+small heartbeat modulation
+       ↓
+motion ratio ≈ baseline
+       ↓
+motion_ok = false
+       ↓
+VACANT
+```
+
+That's potentially a serious false-negative.
+
+I'd separate:
+
+### Occupancy
+
+from:
+
+### Gross motion
+
+Instead of requiring motion for occupancy.
+
+### Your confidence metric is better — but I wouldn't call it "accuracy"
+
+This is an important distinction for your project report.
+
+You're displaying:
+
+```
+confidence: 73%
+```
+
+but that does **not** mean:
+
+ - "There is a 73% probability that the BPM is correct." 
+
+It's a signal-quality/confidence heuristic based on the spectral peak and quality metrics. Your code scales the spectral confidence and multiplies it by the signal-quality score.
+
+That's perfectly reasonable as an engineering indicator, but I'd label it:
+
+```
+CONFIDENCE
+```
+
+or even:
+
+```
+SIGNAL CONFIDENCE
+```
+
+rather than claiming it is statistical accuracy.
+
+### There's another issue with your subcarrier selection
+
+You're selecting the top 80% of subcarriers:
+
+```python
+auto_select_percentile = 80
+```
+
+That's actually a very large number.
+
+For 256 subcarriers, that's roughly:
+
+```
+205 subcarriers
+```
+
+Then you're averaging them.
+
+That's not necessarily what you want.
+
+Your previous experiments already suggested that a **small number of good subcarriers can be substantially better than blindly averaging everything**. Your `fix_peak_detection.py`, for example, explicitly tested [187, 2, 1] as the top three subcarriers.
+
+So I'd eventually move toward something like:
+
+```
+select best 5–20 subcarriers
+        ↓
+quality-weight them
+        ↓
+fuse
+        ↓
+heartbeat signal
+```
+
+rather than:
+
+```
+select 80%
+        ↓
+simple average
+```
+
+That could make a **much bigger difference to your BPM accuracy** than adding more occupancy logic.
+
+## The most important conclusion
+
+```
+packet callback
+      ↓
+shared lock
+      ↓
+30-sec heartbeat processing
+      ↓
+FFT + filtering + subcarrier selection
+      ↓
+spectrogram
+      ↓
+MATPLOTLIB
+      ↓
+disk writes
+```
+
+## What I would do next
+
+```
+                 ┌──→ CSV capture
+                 │
+CSI UDP ──→ buffer
+                 │
+                 └──→ lightweight HR worker
+                              ↓
+                       preprocess CSI
+                              ↓
+                    best subcarriers
+                              ↓
+                       heartbeat signal
+                              ↓
+                         Welch PSD
+                              ↓
+                    quality + confidence
+                              ↓
+                         BPM result
+                              ↓
+                         dashboard
+```
+
+## Result
+
+```
+                 ┌──→ CSV capture
+                 │
+CSI UDP ──→ buffer
+                 │
+                 └──→ lightweight HR worker
+                              ↓
+                       preprocess CSI
+                              ↓
+                    best subcarriers
+                              ↓
+                       heartbeat signal
+                              ↓
+                         Welch PSD
+                              ↓
+                    quality + confidence
+                              ↓
+                         BPM result
+                              ↓
+                         dashboard
+```
