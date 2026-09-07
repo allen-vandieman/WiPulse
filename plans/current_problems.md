@@ -55,3 +55,61 @@ Each `update()` call is a fresh, independent PSD estimate — no continuity cons
 Live only ever uses amplitude. Your validation framework tests phase, phase_common, phase_diff, and the amplitude/phase hybrid too — if one of those came out ahead in your `multi_capture_validation.py` runs, it'd be worth matching the live extraction method to whichever won, rather than defaulting to amplitude.
 
 If you want, I can draft the concrete patch for #1 (quality-scored top-N fusion) since that's the change most likely to actually move your accuracy numbers — it's a fairly direct port of `HeartbeatPipeline` into the live class.
+
+## Improvements needed V2
+
+### Critical: the lock held during heavy work
+
+In `live_monitor.py`, the HR update block does this:
+
+```python
+with state.lock:
+    if len(state.csi_buffer) > 100:
+        csi_batch = np.stack(...)
+        hr_result = heartbeat_extractor.run_full_analysis(...)
+```
+
+`run_full_analysis` isn't lightweight — it computes occupancy, filters every selected subcarrier, computes a spectrogram, generates and saves matplotlib plots to disk, and writes summary files. All of that runs while `state.lock` is held. `state.update()` (called from the sniff callback thread for every incoming packet) needs that same lock. So every `hr_update` interval (default 2s), packet ingestion stalls for however long the plotting/disk-write takes — likely hundreds of ms to seconds. That's packets getting dropped or queued right at the moment you're trying to measure heart rate.
+
+#### Fix: copy the buffer slice under the lock, release the lock, then run the heavy analysis:
+
+```python
+with state.lock:
+    if len(state.csi_buffer) > 100:
+        n = int(hr_config.sampling_rate * args.hr_window)
+        csi_batch = np.stack(state.csi_buffer[-n:], axis=0)
+    else:
+        csi_batch = None
+
+if csi_batch is not None:
+    try:
+        hr_result = heartbeat_extractor.run_full_analysis(...)
+    except Exception as e:
+        logger.debug(f"HR extraction error: {e}")
+```
+
+### Critical: run_full_analysis is way too heavy for a live loop
+
+It's designed as an offline/batch analysis function (plots, spectrograms, text summaries written to disk) but you're now calling it every `hr_update` seconds forever, live. That means continuous disk I/O and matplotlib rendering in your hot path just to get one BPM number for the dashboard. Split it: keep `run_full_analysis` for on-demand/offline use, and add a cheap `estimate_bpm_live()` that does occupancy → bandpass → PSD/FFT → BPM, with no plotting or file writes. Save results only when the user explicitly asks (e.g. on quit, or a keypress).
+
+### Sampling rate mismatch
+
+`hr_config.sampling_rate` is hardcoded to `100.0` in `run_curses`, but your actual packet rate (`state.live_rate`) fluctuates and often isn't exactly 100 Hz. Since the bandpass filter and FFT bin math both depend on `fs`, a rate that's off by even 10-20% will shift your Nyquist-normalized cutoffs and mislabel the frequency axis — silently skewing the BPM output. Feed it the measured rate periodically (e.g. update `heartbeat_extractor.config.sampling_rate = state.live_rate` right before each HR update, once it's stabilized), rather than trusting a fixed constant.
+
+### Occupancy detection quirks
+
+ - `motion_ratio > 1.2` is hardcoded in `detect_occupancy_and_motion`, but `config.motion_threshold` (and CLI `--motion-threshold`) exists and is never used there — it's dead config right now.
+
+ - `min_occupancy_duration` is defined but `occupancy_start_time`/`is_occupied_stable` are never set anywhere, so there's no actual "must be present N seconds before reporting HR" gating despite the config implying there should be.
+
+ - The baseline (`baseline_std`/`baseline_mean`) updates continuously, including while occupied. If someone sits still for a while, the baseline slowly adapts toward their presence, and `motion_ratio` (current/baseline) drifts back down — occupancy detection can silently degrade the longer someone stays. Consider only updating the baseline while `not is_occupied` (or with a much slower adaptation rate during occupancy).
+
+ - `energy = mean(amp²) / (max(amp)² + eps)` is closer to an inverse crest-factor than an absolute energy measure — it's fairly scale-invariant, so it may not discriminate presence vs. no-presence as cleanly as the name suggests. Worth sanity-checking against real occupied vs. empty-room captures to see if `occupancy_energy_threshold` is actually separating them.
+
+#### Smaller things
+
+- `select_best_subcarriers` re-runs its full scoring pass on every `hr_update` call, so the selected channel set can flicker between updates, adding noise to the BPM series. Consider caching the selection for a few cycles or smoothing it.
+
+ - `confidence = fft_peak_confidence * quality_metrics['quality']` combines two independently-noisy 0-1(ish) scores multiplicatively, which tends to bias the combined confidence low. Worth checking empirically whether this matches how "confident" the numbers actually feel.
+
+ - Exceptions in the live HR path are swallowed with `logger.debug` only — if extraction silently starts failing (e.g. a shape mismatch), the dashboard just keeps showing the last cached BPM forever with no visible indication something broke.

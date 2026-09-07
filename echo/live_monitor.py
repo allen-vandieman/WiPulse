@@ -8,7 +8,7 @@ Real-time terminal dashboard for Nexmon CSI streams.
 
 In addition to packet statistics, amplitude/phase, motion score, and
 key-triggered CSI capture, this version estimates heart rate (BPM) from
-the live CSI stream.
+the live CSI stream with occupancy detection and motion scoring.
 
 Live heartbeat pipeline
 -----------------------
@@ -48,8 +48,13 @@ Live heartbeat pipeline
         v
     Estimated BPM
 
-The BPM estimator uses a rolling time window rather than trying to estimate
-heart rate from individual packets.
+OCCUPANCY AND MOTION DETECTION
+------------------------------
+
+    Energy-based occupancy detection
+    Motion scoring with baseline adaptation
+    Signal quality assessment
+    Confidence-based BPM validation
 
 Usage
 -----
@@ -78,6 +83,12 @@ Useful options:
 
     --hr-notch 0
         Optional notch frequency in Hz. 0 disables notch filtering.
+
+    --motion-threshold 2.5
+        Motion score threshold (higher = less sensitive to motion).
+
+    --occupancy-threshold 0.05
+        Energy threshold for occupancy detection.
 
 Press 'q' to quit.
 Press 'c' to start/stop recording decoded CSI to a timestamped CSV.
@@ -113,6 +124,9 @@ from filters import (
     FilterConfig,
     CSIFilter,
 )
+
+# Use the enhanced heartbeat extraction
+from heartbeat_extraction import HeartbeatExtractor, HeartbeatConfig
 
 try:
     from scipy.signal import welch
@@ -304,636 +318,6 @@ def sparkline(values, width: int = 40) -> str:
 
 
 # ---------------------------------------------------------------------------
-# HEART RATE ESTIMATOR
-# ---------------------------------------------------------------------------
-
-class HeartRateEstimator:
-    """
-    Rolling live CSI heart-rate estimator.
-
-    CSI is stored as complex data so that the CSI quality-cleaning stage
-    can operate before amplitude extraction.
-
-    The estimator deliberately uses a relatively long rolling window because
-    heartbeat is a low-frequency signal and a short window produces unstable
-    PSD estimates.
-    """
-
-    def __init__(
-        self,
-        window_seconds: float = 30.0,
-        update_seconds: float = 2.0,
-        low_hz: float = 0.7,
-        high_hz: float = 2.5,
-        hampel_window: int = 51,
-        hampel_sigmas: float = 3.0,
-        notch_hz: float = 0.0,
-        drift_window: int = 21,
-    ):
-        self.window_seconds = float(window_seconds)
-        self.update_seconds = float(update_seconds)
-
-        self.low_hz = float(low_hz)
-        self.high_hz = float(high_hz)
-
-        self.hampel_window = int(hampel_window)
-        self.hampel_sigmas = float(hampel_sigmas)
-
-        self.notch_hz = float(notch_hz)
-        self.drift_window = int(drift_window)
-
-        self.frames = deque()
-        self.timestamps = deque()
-
-        self.lock = threading.Lock()
-
-        self.last_update = 0.0
-
-        self.bpm: Optional[float] = None
-        self.confidence: Optional[float] = None
-        self.peak_hz: Optional[float] = None
-
-        self.status = "warming up"
-
-        self.last_sample_rate: Optional[float] = None
-
-        # We create the CSI cleaner once rather than constructing it for
-        # every heartbeat calculation.
-        try:
-            config = FilterConfig(
-                sampling_rate=100.0,
-                interpolate_problematic=True,
-                apply_notch=False,
-                apply_hampel=False,
-            )
-
-            self.csi_filter = CSIFilter(config)
-
-        except Exception as exc:
-            logger.warning(
-                "Could not initialize CSIFilter: %s",
-                exc,
-            )
-
-            self.csi_filter = None
-
-    # ------------------------------------------------------------------
-    # FRAME INPUT
-    # ------------------------------------------------------------------
-
-    def add_frame(self, frame):
-        """
-        Add one CSI frame.
-
-        Frames are retained according to timestamp rather than simply
-        packet count so packet-rate variations do not change the intended
-        time window.
-        """
-
-        now = float(frame.ts)
-
-        with self.lock:
-
-            self.frames.append(
-                np.asarray(frame.csi, dtype=np.complex128)
-            )
-
-            self.timestamps.append(now)
-
-            cutoff = now - self.window_seconds
-
-            while (
-                self.timestamps
-                and self.timestamps[0] < cutoff
-            ):
-                self.timestamps.popleft()
-                self.frames.popleft()
-
-    # ------------------------------------------------------------------
-    # SAMPLE RATE
-    # ------------------------------------------------------------------
-
-    def _estimate_sample_rate(self, timestamps):
-        """
-        Estimate actual CSI sample rate from packet timestamps.
-        """
-
-        if len(timestamps) < 2:
-            return None
-
-        ts = np.asarray(
-            timestamps,
-            dtype=np.float64,
-        )
-
-        dt = np.diff(ts)
-
-        # Remove clearly broken intervals caused by packet gaps.
-        dt = dt[
-            np.isfinite(dt)
-            & (dt > 0)
-        ]
-
-        if len(dt) < 10:
-            return None
-
-        # Median is more robust than mean when packet loss occurs.
-        median_dt = float(
-            np.median(dt)
-        )
-
-        if median_dt <= 0:
-            return None
-
-        return 1.0 / median_dt
-
-    # ------------------------------------------------------------------
-    # CSI QUALITY CLEANING
-    # ------------------------------------------------------------------
-
-    def _clean_csi(self, csi):
-        """
-        Apply the CSI-level cleaning stage.
-
-        The unified filters.py contains the CSI-specific detection and
-        interpolation logic. If that API is unavailable for some reason,
-        the raw CSI is retained rather than crashing the live dashboard.
-        """
-
-        if self.csi_filter is None:
-            return csi
-
-        try:
-            cleaned = self.csi_filter.clean_csi(csi)
-
-            if cleaned is not None:
-                return np.asarray(
-                    cleaned,
-                    dtype=np.complex128,
-                )
-
-        except Exception as exc:
-            logger.debug(
-                "CSI cleaning failed: %s",
-                exc,
-            )
-
-        return csi
-
-    # ------------------------------------------------------------------
-    # SIGNAL EXTRACTION
-    # ------------------------------------------------------------------
-
-    def _extract_best_signal(self, csi):
-        """
-        Extract a heartbeat candidate from the CSI matrix.
-
-        For the live dashboard we first clean the CSI and then calculate
-        amplitude.
-
-        We use the median across subcarriers rather than blindly using
-        every subcarrier equally. This reduces the influence of extreme
-        subcarriers while retaining the common heartbeat variation.
-        """
-
-        amp = np.abs(csi)
-
-        if amp.ndim != 2:
-            return None
-
-        # Remove subcarriers that contain almost no useful variation.
-        sc_std = np.std(
-            amp,
-            axis=0,
-        )
-
-        sc_mean = np.mean(
-            amp,
-            axis=0,
-        )
-
-        valid = (
-            np.isfinite(sc_std)
-            & np.isfinite(sc_mean)
-            & (sc_mean > 1e-9)
-        )
-
-        if np.count_nonzero(valid) < 3:
-            return None
-
-        valid_amp = amp[:, valid]
-
-        # Normalize each subcarrier by its own average amplitude.
-        #
-        # This prevents large-amplitude subcarriers from dominating the
-        # combined heartbeat signal.
-        valid_mean = np.mean(
-            valid_amp,
-            axis=0,
-        )
-
-        normalized = (
-            valid_amp
-            / np.maximum(valid_mean, 1e-12)
-        )
-
-        # Median across valid subcarriers gives a robust common-mode
-        # heartbeat signal.
-        signal = np.median(
-            normalized,
-            axis=1,
-        )
-
-        return np.asarray(
-            signal,
-            dtype=np.float64,
-        )
-
-    # ------------------------------------------------------------------
-    # HEARTBEAT PIPELINE
-    # ------------------------------------------------------------------
-
-    def _process_signal(
-        self,
-        signal,
-        fs,
-    ):
-        """
-        Apply the recommended heartbeat signal-processing pipeline.
-        """
-
-        signal = np.asarray(
-            signal,
-            dtype=np.float64,
-        )
-
-        if len(signal) < 100:
-            return None
-
-        if not np.all(
-            np.isfinite(signal)
-        ):
-            signal = np.nan_to_num(
-                signal,
-                nan=0.0,
-                posinf=0.0,
-                neginf=0.0,
-            )
-
-        # --------------------------------------------------------------
-        # 1. Hampel filter
-        # --------------------------------------------------------------
-
-        try:
-            signal = hampel_filter(
-                signal,
-                window_size=self.hampel_window,
-                n_sigmas=self.hampel_sigmas,
-            )
-        except Exception:
-            pass
-
-        # --------------------------------------------------------------
-        # 2. Optional notch
-        # --------------------------------------------------------------
-
-        if self.notch_hz > 0:
-
-            try:
-                signal = notch_filter(
-                    signal,
-                    notch_hz=self.notch_hz,
-                    fs_hz=fs,
-                    quality=30.0,
-                )
-            except TypeError:
-
-                # Compatibility with possible alternate parameter name.
-                try:
-                    signal = notch_filter(
-                        signal,
-                        fs=fs,
-                        frequencies=[
-                            self.notch_hz
-                        ],
-                        Q=30.0,
-                    )
-                except Exception:
-                    pass
-
-            except Exception:
-                pass
-
-        # --------------------------------------------------------------
-        # 3. Heartbeat bandpass
-        # --------------------------------------------------------------
-
-        try:
-            signal = butterworth_bandpass(
-                signal,
-                fs_hz=fs,
-                low_hz=self.low_hz,
-                high_hz=self.high_hz,
-                order=4,
-            )
-
-        except TypeError:
-
-            # Compatibility fallback for alternate argument names.
-            try:
-                signal = butterworth_bandpass(
-                    signal,
-                    fs_hz=fs,
-                    low_hz=self.low_hz,
-                    high_hz=self.high_hz,
-                    order=4,
-                )
-            except Exception:
-                return None
-
-        except Exception:
-            return None
-
-        # --------------------------------------------------------------
-        # 4. Remove slow drift
-        # --------------------------------------------------------------
-
-        try:
-            signal = remove_dc_drift(
-                signal,
-                window_size=self.drift_window,
-            )
-
-        except TypeError:
-
-            try:
-                signal = remove_dc_drift(
-                    signal,
-                    window=self.drift_window,
-                )
-            except Exception:
-                pass
-
-        except Exception:
-            pass
-
-        # --------------------------------------------------------------
-        # 5. Normalize
-        # --------------------------------------------------------------
-
-        try:
-            signal = normalize_signal(
-                signal
-            )
-        except Exception:
-
-            std = np.std(signal)
-
-            if std > 1e-12:
-                signal = (
-                    signal - np.mean(signal)
-                ) / std
-            else:
-                return None
-
-        if not np.all(
-            np.isfinite(signal)
-        ):
-            return None
-
-        return signal
-
-    # ------------------------------------------------------------------
-    # PSD / BPM
-    # ------------------------------------------------------------------
-
-    def _estimate_bpm(self, signal, fs):
-        """
-        Estimate BPM from the dominant heartbeat-band PSD peak.
-        """
-
-        if welch is None:
-            self.status = "scipy.signal.welch unavailable"
-            return None, None, None
-
-        n = len(signal)
-
-        if n < max(
-            200,
-            int(fs * 10),
-        ):
-            return None, None, None
-
-        # Use roughly 8-second Welch segments.
-        nperseg = min(
-            n,
-            max(
-                256,
-                int(fs * 8),
-            ),
-        )
-
-        if nperseg >= n:
-            nperseg = n
-
-        try:
-            freqs, psd = welch(
-                signal,
-                fs=fs,
-                window="hann",
-                nperseg=nperseg,
-                noverlap=nperseg // 2,
-                detrend="constant",
-                scaling="density",
-            )
-        except Exception as exc:
-            logger.debug(
-                "Welch PSD failed: %s",
-                exc,
-            )
-            return None, None, None
-
-        band = (
-            (freqs >= self.low_hz)
-            & (freqs <= self.high_hz)
-            & np.isfinite(psd)
-        )
-
-        if not np.any(band):
-            return None, None, None
-
-        band_freqs = freqs[band]
-        band_psd = psd[band]
-
-        if len(band_psd) == 0:
-            return None, None, None
-
-        peak_idx = int(
-            np.argmax(band_psd)
-        )
-
-        peak_power = float(
-            band_psd[peak_idx]
-        )
-
-        peak_hz = float(
-            band_freqs[peak_idx]
-        )
-
-        bpm = peak_hz * 60.0
-
-        # --------------------------------------------------------------
-        # Confidence estimate
-        # --------------------------------------------------------------
-        #
-        # Compare the strongest PSD peak with the median power in the
-        # heartbeat band. A clean heartbeat should produce a relatively
-        # strong narrow peak.
-        #
-
-        median_power = float(
-            np.median(band_psd)
-        )
-
-        if median_power > 1e-12:
-            peak_ratio = (
-                peak_power
-                / median_power
-            )
-        else:
-            peak_ratio = 0.0
-
-        # Convert the ratio into a simple 0-100 confidence scale.
-        confidence = np.clip(
-            (peak_ratio - 1.0) / 9.0 * 100.0,
-            0.0,
-            100.0,
-        )
-
-        return (
-            float(bpm),
-            float(confidence),
-            peak_hz,
-        )
-
-    # ------------------------------------------------------------------
-    # UPDATE
-    # ------------------------------------------------------------------
-
-    def update(self, force=False):
-        """
-        Recalculate BPM if enough time has passed.
-
-        Returns the current BPM.
-        """
-
-        now = time.time()
-
-        if (
-            not force
-            and now - self.last_update
-            < self.update_seconds
-        ):
-            return self.bpm
-
-        with self.lock:
-
-            if len(self.frames) < 100:
-                self.status = "warming up"
-                return self.bpm
-
-            frames = np.stack(
-                list(self.frames),
-                axis=0,
-            )
-
-            timestamps = np.asarray(
-                self.timestamps,
-                dtype=np.float64,
-            )
-
-        duration = (
-            timestamps[-1]
-            - timestamps[0]
-        )
-
-        if duration < self.window_seconds * 0.6:
-            self.status = (
-                f"warming up "
-                f"({duration:.1f}/{self.window_seconds:.0f}s)"
-            )
-            return self.bpm
-
-        fs = self._estimate_sample_rate(
-            timestamps
-        )
-
-        if fs is None:
-            self.status = "estimating sample rate"
-            return self.bpm
-
-        self.last_sample_rate = fs
-
-        # --------------------------------------------------------------
-        # CSI cleaning
-        # --------------------------------------------------------------
-
-        cleaned_csi = self._clean_csi(
-            frames
-        )
-
-        # --------------------------------------------------------------
-        # Extract common amplitude heartbeat signal
-        # --------------------------------------------------------------
-
-        signal = self._extract_best_signal(
-            cleaned_csi
-        )
-
-        if signal is None:
-            self.status = "no usable CSI signal"
-            return self.bpm
-
-        # --------------------------------------------------------------
-        # Signal-processing pipeline
-        # --------------------------------------------------------------
-
-        processed = self._process_signal(
-            signal,
-            fs,
-        )
-
-        if processed is None:
-            self.status = "signal processing failed"
-            return self.bpm
-
-        # --------------------------------------------------------------
-        # PSD / BPM
-        # --------------------------------------------------------------
-
-        bpm, confidence, peak_hz = (
-            self._estimate_bpm(
-                processed,
-                fs,
-            )
-        )
-
-        if bpm is None:
-            self.status = "no heartbeat peak"
-            return self.bpm
-
-        self.bpm = bpm
-        self.confidence = confidence
-        self.peak_hz = peak_hz
-
-        self.last_update = now
-
-        self.status = "OK"
-
-        return self.bpm
-
-
-# ---------------------------------------------------------------------------
 # LIVE STATE
 # ---------------------------------------------------------------------------
 
@@ -944,7 +328,7 @@ class LiveState:
         self,
         window: int,
         capture: Optional[CSICapture] = None,
-        hr_estimator: Optional[HeartRateEstimator] = None,
+        heartbeat_extractor: Optional[HeartbeatExtractor] = None,
     ):
         self.window = window
 
@@ -971,8 +355,11 @@ class LiveState:
         self.lock = threading.Lock()
 
         self.capture = capture
-
-        self.hr_estimator = hr_estimator
+        self.heartbeat_extractor = heartbeat_extractor
+        
+        # Buffer for rolling CSI data for heartbeat extraction
+        self.csi_buffer = []
+        self.ts_buffer = []
 
     def update(self, frame):
 
@@ -1001,12 +388,21 @@ class LiveState:
             self.per_sc_amp_hist.append(
                 amp
             )
+            
+            # Store CSI data for heartbeat extraction
+            self.csi_buffer.append(frame.csi)
+            self.ts_buffer.append(frame.ts)
+            
+            # Keep buffer within reasonable size
+            max_buffer = int(self.heartbeat_extractor.config.sampling_rate * 60) if self.heartbeat_extractor else 6000
+            if len(self.csi_buffer) > max_buffer:
+                self.csi_buffer = self.csi_buffer[-max_buffer:]
+                self.ts_buffer = self.ts_buffer[-max_buffer:]
 
-        # Heart-rate buffer.
-        if self.hr_estimator is not None:
-            self.hr_estimator.add_frame(
-                frame
-            )
+        # Heartbeat extraction is done separately
+        if self.heartbeat_extractor is not None:
+            # We'll process in batches to avoid overhead
+            pass
 
         # Outside the state lock so a slow disk write never blocks
         # dashboard bookkeeping.
@@ -1170,21 +566,25 @@ def run_curses(
         mode=args.capture_mode,
     )
 
-    hr_estimator = HeartRateEstimator(
-        window_seconds=args.hr_window,
-        update_seconds=args.hr_update,
-        low_hz=args.hr_low,
-        high_hz=args.hr_high,
-        hampel_window=args.hr_hampel_window,
-        hampel_sigmas=args.hr_hampel_sigmas,
-        notch_hz=args.hr_notch,
-        drift_window=args.hr_drift_window,
-    )
+    # ============ Create heartbeat extractor with occupancy detection ============
+    hr_config = HeartbeatConfig()
+    hr_config.sampling_rate = 100.0
+    hr_config.bandpass_low = args.hr_low
+    hr_config.bandpass_high = args.hr_high
+    hr_config.filter_order = 4
+    hr_config.heart_rate_min = args.hr_low * 60
+    hr_config.heart_rate_max = args.hr_high * 60
+    hr_config.occupancy_energy_threshold = args.occupancy_threshold
+    hr_config.min_snr = args.min_snr
+    hr_config.max_hr_change = args.max_hr_change
+    hr_config.segment_duration = args.hr_window
+    
+    heartbeat_extractor = HeartbeatExtractor(hr_config)
 
     state = LiveState(
         window=args.window,
         capture=capture,
-        hr_estimator=hr_estimator,
+        heartbeat_extractor=heartbeat_extractor,
     )
 
     baseline_motion = None
@@ -1236,6 +636,10 @@ def run_curses(
 
     t.start()
 
+    # Variables for periodic HR update
+    last_hr_update = 0
+    hr_update_interval = args.hr_update
+
     try:
 
         while True:
@@ -1284,11 +688,25 @@ def run_curses(
 
                     continue
 
-                # ------------------------------------------------------
-                # Update BPM
-                # ------------------------------------------------------
-
-                hr_estimator.update()
+                # ============ Update heartbeat extraction ============
+                now = time.time()
+                if now - last_hr_update >= hr_update_interval:
+                    last_hr_update = now
+                    
+                    with state.lock:
+                        if len(state.csi_buffer) > 100:
+                            # Convert buffer to numpy array
+                            csi_batch = np.stack(state.csi_buffer[-int(hr_config.sampling_rate * args.hr_window):], axis=0)
+                            
+                            # Run extraction
+                            try:
+                                hr_result = heartbeat_extractor.run_full_analysis(
+                                    csi_batch,
+                                    {'rate': hr_config.sampling_rate},
+                                    output_dir=args.output_dir / 'heartbeat_analysis'
+                                )
+                            except Exception as e:
+                                logger.debug(f"HR extraction error: {e}")
 
                 # ------------------------------------------------------
                 # Dashboard
@@ -1386,78 +804,38 @@ def run_curses(
                         f"{capture.out_dir}/{prev}",
                     )
 
-                # ------------------------------------------------------
-                # Heart rate
-                # ------------------------------------------------------
+                # ============ Heart rate with occupancy ============
+                
+                # Get metrics from heartbeat extractor
+                occupancy = heartbeat_extractor.occupancy if hasattr(heartbeat_extractor, 'occupancy') else False
+                motion_level = heartbeat_extractor.motion_level if hasattr(heartbeat_extractor, 'motion_level') else 0
+                signal_quality = heartbeat_extractor.signal_quality if hasattr(heartbeat_extractor, 'signal_quality') else 0
+                hr = heartbeat_extractor.last_valid_bpm or 0
+                confidence = heartbeat_extractor.confidence if hasattr(heartbeat_extractor, 'confidence') else 0
+                
+                # Display occupancy status
+                occupancy_str = "OCCUPIED" if occupancy else "VACANT"
+                occupancy_color = curses.A_BOLD if occupancy else curses.A_NORMAL
+                stdscr.attron(occupancy_color)
+                put(5, f"OCCUPANCY: {occupancy_str}   motion: {motion_level:.3f}   quality: {signal_quality:.2f}")
+                stdscr.attroff(occupancy_color)
 
-                if hr_estimator.bpm is not None:
-
-                    bpm = (
-                        hr_estimator.bpm
-                    )
-
-                    confidence = (
-                        hr_estimator.confidence
-                        if hr_estimator.confidence
-                        is not None
-                        else 0.0
-                    )
-
-                    put(
-                        5,
-                        f"ESTIMATED BPM: "
-                        f"{bpm:6.1f} BPM    "
-                        f"confidence: "
-                        f"{confidence:5.1f}%",
-                    )
-
-                    put(
-                        6,
-                        f"  heartbeat band: "
-                        f"{args.hr_low:.2f}-"
-                        f"{args.hr_high:.2f} Hz    "
-                        f"PSD peak: "
-                        f"{hr_estimator.peak_hz:.3f} Hz",
-                    )
-
-                    if (
-                        hr_estimator.last_sample_rate
-                        is not None
-                    ):
-
-                        put(
-                            7,
-                            f"  HR window: "
-                            f"{args.hr_window:.0f}s    "
-                            f"sample rate: "
-                            f"{hr_estimator.last_sample_rate:.2f} Hz    "
-                            f"status: "
-                            f"{hr_estimator.status}",
-                        )
-
+                # Display BPM
+                if occupancy and hr > 0 and signal_quality > args.min_snr:
+                    put(6, f"ESTIMATED BPM: {hr:6.1f} BPM    confidence: {confidence:5.1f}%")
+                    put(7, f"  heartbeat band: {args.hr_low:.2f}-{args.hr_high:.2f} Hz")
+                elif occupancy:
+                    put(6, f"ESTIMATED BPM: ---.- BPM  (signal quality too low)")
+                    put(7, f"  quality: {signal_quality:.2f}, need > {args.min_snr}")
                 else:
+                    put(6, f"ESTIMATED BPM: ---.- BPM  (no occupancy)")
+                    put(7, f"  waiting for subject to enter detection zone")
 
-                    put(
-                        5,
-                        f"ESTIMATED BPM: "
-                        f"--.- BPM    "
-                        f"status: "
-                        f"{hr_estimator.status}",
-                    )
-
-                    put(
-                        6,
-                        f"  heartbeat band: "
-                        f"{args.hr_low:.2f}-"
-                        f"{args.hr_high:.2f} Hz    "
-                        f"HR window: "
-                        f"{args.hr_window:.0f}s",
-                    )
-
-                    put(
-                        7,
-                        "  waiting for sufficient CSI data...",
-                    )
+                # Motion trend
+                if hasattr(heartbeat_extractor, 'get_motion_trend'):
+                    motion_trend = heartbeat_extractor.get_motion_trend(20)
+                    if len(motion_trend) > 5:
+                        put(8, f"motion trend: {sparkline(motion_trend, width=min(40, w-15))}")
 
                 # ------------------------------------------------------
                 # Last packet
@@ -1473,8 +851,7 @@ def run_curses(
                         else "n/a"
                     )
 
-                    put(
-                        9,
+                    put(10,
                         f"last packet -- "
                         f"seq={frame.seq_num:5d}  "
                         f"core={frame.core}  "
@@ -1492,14 +869,12 @@ def run_curses(
                         deg=True,
                     )
 
-                    put(
-                        11,
+                    put(12,
                         f"current mean amplitude: "
                         f"{float(np.mean(amp)):10.2f}",
                     )
 
-                    put(
-                        12,
+                    put(13,
                         f"current mean phase:     "
                         f"{float(np.mean(ph)):10.2f} deg",
                     )
@@ -1508,14 +883,12 @@ def run_curses(
                     # Raw amplitude trend
                     # --------------------------------------------------
 
-                    put(
-                        14,
+                    put(15,
                         f"amplitude trend "
                         f"(last {len(state.mean_amp_hist)} pkts, raw):",
                     )
 
-                    put(
-                        15,
+                    put(16,
                         sparkline(
                             state.mean_amp_hist,
                             width=min(
@@ -1531,8 +904,7 @@ def run_curses(
 
                     if args.hampel:
 
-                        put(
-                            16,
+                        put(17,
                             f"amplitude trend "
                             f"(Hampel window="
                             f"{args.hampel_window}, "
@@ -1559,8 +931,7 @@ def run_curses(
                                 )
                             )
 
-                            put(
-                                17,
+                            put(18,
                                 sparkline(
                                     filtered_hist,
                                     width=min(
@@ -1572,8 +943,7 @@ def run_curses(
 
                         else:
 
-                            put(
-                                17,
+                            put(18,
                                 "(warming up...)",
                             )
 
@@ -1581,14 +951,12 @@ def run_curses(
                     # Subcarrier profile
                     # --------------------------------------------------
 
-                    put(
-                        19,
+                    put(20,
                         "current subcarrier profile "
                         "(this packet):",
                     )
 
-                    put(
-                        20,
+                    put(21,
                         sparkline(
                             np.fft.fftshift(amp),
                             width=min(
@@ -1614,8 +982,7 @@ def run_curses(
                         ):
                             baseline_motion = ms
 
-                        put(
-                            22,
+                        put(23,
                             f"motion score "
                             f"(rolling {args.window}-pkt "
                             f"window): {ms:.5f}",
@@ -1630,8 +997,7 @@ def run_curses(
                                 else 0
                             )
 
-                            put(
-                                23,
+                            put(24,
                                 f"  vs baseline: "
                                 f"{ratio:5.2f}x",
                             )
@@ -1645,8 +1011,7 @@ def run_curses(
                                     curses.A_BOLD
                                 )
 
-                                put(
-                                    24,
+                                put(25,
                                     "** MOTION / CHANGE "
                                     "DETECTED **",
                                 )
@@ -1657,8 +1022,7 @@ def run_curses(
 
                     else:
 
-                        put(
-                            22,
+                        put(23,
                             f"motion score: "
                             f"(warming up, need "
                             f"{baseline_needed} packets)",
@@ -1666,8 +1030,7 @@ def run_curses(
 
                 else:
 
-                    put(
-                        9,
+                    put(9,
                         "waiting for first CSI packet... "
                         "(check --iface / --src-ip / "
                         "that the sender is actually running)",
@@ -1927,6 +1290,38 @@ def main(argv=None):
         default=21,
         help=(
             "Moving-average drift-removal window"
+        ),
+    )
+
+    # ============ NEW: OCCUPANCY AND MOTION OPTIONS ============
+    
+    p.add_argument(
+        "--occupancy-threshold",
+        type=float,
+        default=0.05,
+        help=(
+            "Energy threshold for occupancy detection "
+            "(lower = more sensitive)"
+        ),
+    )
+
+    p.add_argument(
+        "--min-snr",
+        type=float,
+        default=1.5,
+        help=(
+            "Minimum SNR for valid BPM estimate "
+            "(higher = more conservative)"
+        ),
+    )
+
+    p.add_argument(
+        "--max-hr-change",
+        type=float,
+        default=30.0,
+        help=(
+            "Maximum BPM change between estimates "
+            "(higher = more responsive)"
         ),
     )
 

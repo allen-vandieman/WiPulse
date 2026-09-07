@@ -1,4 +1,31 @@
-# Capturing
+# ECHO
+
+## Application
+
+```
+project/
+├── live_monitor.py          # Main dashboard (UPDATED with integration)
+├── heartbeat_extraction.py  # Enhanced with occupancy/motion (UPDATED)
+├── filters.py               # CSI filtering utilities (unchanged)
+├── decoder.py               # CSI decoding (unchanged)
+├── read_csv_csi.py          # CSV loading (unchanged)
+├── windowed_psd_analysis.py # Offline analysis (unchanged)
+├── pi_serial_recorder.py    # Ground truth recording (unchanged)
+└── output/                  # Output directory
+```
+
+## Running the Live Monitor
+
+```bash
+sudo python live_monitor.py \
+    --iface wlan0 \
+    --chip 43455c0 \
+    --bw 80 \
+    --capture-mode complex \
+    --occupancy-threshold 0.05 \
+    --min-snr 1.5 \
+    --max-hr-change 30.0
+```
 
 ## Live Monitor 
 

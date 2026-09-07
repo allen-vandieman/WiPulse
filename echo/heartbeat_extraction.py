@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # heartbeat_extraction.py - Heartbeat Detection Module
+# Enhanced with occupancy detection, motion scoring, and signal quality assessment
 
 import numpy as np
 from scipy import signal
@@ -8,6 +9,9 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from pathlib import Path
+import time
+from collections import deque
+from typing import Optional, Tuple, Dict, List
 
 
 class HeartbeatConfig:
@@ -35,10 +39,23 @@ class HeartbeatConfig:
         self.use_all_subcarriers = False  # If False, automatically select best subcarriers
         self.auto_select_percentile = 80  # Percentile for selecting best subcarriers
         self.max_subcarriers_to_plot = 10 # Max subcarriers to display in comparisons
+        
+        # ============ NEW: OCCUPANCY AND MOTION DETECTION ============
+        # Motion detection
+        self.motion_window_seconds = 3.0      # Window for motion analysis
+        self.motion_threshold = 2.5           # Motion score threshold (higher = less sensitive)
+        self.occupancy_energy_threshold = 0.05 # Minimum energy for occupancy
+        self.min_snr = 1.5                    # Minimum SNR for valid BPM
+        self.max_hr_change = 30.0             # Max BPM change between estimates
+        self.min_occupancy_duration = 5.0     # Seconds of occupancy required before reporting HR
+        
+        # Quality thresholds
+        self.min_peak_prominence = 2.0
+        self.min_signal_quality = 0.2
 
 
 class HeartbeatExtractor:
-    """Extract heartbeat signal from CSI data"""
+    """Extract heartbeat signal from CSI data with occupancy and motion detection"""
     
     def __init__(self, config=None):
         self.config = config if config else HeartbeatConfig()
@@ -48,6 +65,21 @@ class HeartbeatExtractor:
         self.spectrogram = None
         self.frequencies = None
         self.times = None
+        
+        # ============ NEW: STATE FOR OCCUPANCY AND MOTION ============
+        self.occupancy = False
+        self.motion_level = 0.0
+        self.signal_quality = 0.0
+        self.confidence = 0.0
+        self.occupancy_start_time = None
+        self.is_occupied_stable = False
+        self.amp_history = deque(maxlen=100)
+        self.motion_history = deque(maxlen=100)
+        self.hr_history = deque(maxlen=5)
+        self.last_valid_bpm = None
+        self.baseline_std = None
+        self.baseline_mean = None
+        self.baseline_update_time = 0
         
     def design_bandpass_filter(self):
         """Design a bandpass Butterworth filter for heartbeat extraction"""
@@ -71,10 +103,154 @@ class HeartbeatExtractor:
         
         return sos
     
+    # ============ NEW: OCCUPANCY AND MOTION DETECTION METHODS ============
+    
+    def detect_occupancy_and_motion(self, csi_data) -> Tuple[bool, float, float]:
+        """
+        Detect if someone is present and estimate motion level.
+        
+        Returns:
+            (is_occupied, motion_level, energy)
+        """
+        if csi_data is None or len(csi_data) < 10:
+            return False, 0.0, 0.0
+        
+        # Compute amplitude statistics
+        amps = np.abs(csi_data)
+        mean_amp = np.mean(amps)
+        
+        # Energy: total signal power
+        energy = np.mean(amps ** 2) / (np.max(amps) ** 2 + 1e-9)
+        energy = np.clip(energy, 0, 1)
+        
+        # Motion: variance of amplitude over time
+        time_variance = np.var(amps, axis=0)
+        mean_variance = np.mean(time_variance)
+        motion_level = mean_variance / (mean_amp ** 2 + 1e-9)
+        motion_level = np.clip(motion_level, 0, 10)
+        
+        # Subcarrier diversity: how much subcarriers vary within a packet
+        sc_variance = np.var(amps, axis=1)
+        sc_diversity = np.mean(sc_variance) / (mean_amp ** 2 + 1e-9)
+        sc_diversity = np.clip(sc_diversity, 0, 1)
+        
+        # Baseline comparison (adaptive)
+        current_std = np.std(amps.flatten())
+        
+        # Update baseline
+        if self.baseline_std is None:
+            self.baseline_std = current_std
+            self.baseline_mean = mean_amp
+        else:
+            # Slow adaptation
+            self.baseline_std = 0.95 * self.baseline_std + 0.05 * current_std
+            self.baseline_mean = 0.95 * self.baseline_mean + 0.05 * mean_amp
+        
+        # Motion ratio relative to baseline
+        baseline_std = self.baseline_std or 0.001
+        motion_ratio = current_std / baseline_std
+        
+        # Occupancy detection based on multiple factors:
+        # 1. Energy above threshold (signal present)
+        # 2. Subcarrier diversity (not just noise floor)
+        # 3. Some temporal variation (not static)
+        # 4. Motion ratio > threshold for dynamic signals
+        
+        energy_ok = energy > self.config.occupancy_energy_threshold
+        diversity_ok = sc_diversity > 0.01
+        motion_ok = motion_ratio > 1.2
+        
+        is_occupied = energy_ok and diversity_ok and motion_ok
+        
+        # Store history
+        self.amp_history.append(mean_amp)
+        self.motion_history.append(motion_ratio)
+        
+        return is_occupied, motion_ratio, energy
+    
+    def assess_signal_quality(self, signal_data) -> Dict[str, float]:
+        """
+        Assess the quality of the extracted heartbeat signal.
+        
+        Returns:
+            Dict with quality metrics
+        """
+        if len(signal_data) < 100:
+            return {"snr": 0.0, "prominence": 0.0, "quality": 0.0}
+        
+        # Compute PSD
+        nperseg = min(len(signal_data), int(self.config.sampling_rate * 8))
+        freqs, psd = signal.welch(
+            signal_data,
+            fs=self.config.sampling_rate,
+            window='hann',
+            nperseg=nperseg,
+            noverlap=nperseg // 2,
+            scaling='density'
+        )
+        
+        # Heartbeat band
+        hr_min_hz = self.config.heart_rate_min / 60.0
+        hr_max_hz = self.config.heart_rate_max / 60.0
+        band_mask = (freqs >= hr_min_hz) & (freqs <= hr_max_hz)
+        
+        if not np.any(band_mask):
+            return {"snr": 0.0, "prominence": 0.0, "quality": 0.0}
+        
+        band_freqs = freqs[band_mask]
+        band_psd = psd[band_mask]
+        
+        # Find peaks
+        peaks, props = signal.find_peaks(
+            band_psd,
+            prominence=np.std(band_psd) * 0.3
+        )
+        
+        if len(peaks) == 0:
+            return {"snr": 0.0, "prominence": 0.0, "quality": 0.0}
+        
+        # Best peak by prominence
+        best_idx = peaks[np.argmax(props["prominences"])]
+        peak_power = band_psd[best_idx]
+        peak_prominence = props["prominences"][best_idx]
+        
+        # SNR: peak power vs median in band
+        median_power = np.median(band_psd)
+        snr = peak_power / (median_power + 1e-12)
+        snr = np.clip(snr, 0, 20)
+        
+        # Overall quality (0-1)
+        quality = np.clip((snr - 1.0) / 9.0, 0, 1)
+        
+        return {
+            "snr": snr,
+            "prominence": peak_prominence,
+            "quality": quality,
+            "peak_freq": band_freqs[best_idx],
+        }
+    
+    def get_motion_trend(self, window: int = 20) -> np.ndarray:
+        """Get recent motion scores for trend analysis."""
+        if len(self.motion_history) < window:
+            return np.array(list(self.motion_history))
+        return np.array(list(self.motion_history)[-window:])
+    
+    def get_motion_classification(self, motion_score: float) -> str:
+        """Classify motion level."""
+        if motion_score < 1.2:
+            return "static"
+        elif motion_score < 2.0:
+            return "subtle"
+        elif motion_score < 4.0:
+            return "active"
+        else:
+            return "high"
+    
+    # ============ MODIFIED: EXISTING METHODS WITH OCCUPANCY INTEGRATION ============
+    
     def apply_bandpass_filter(self, csi_data, subcarrier_indices=None):
         """Apply bandpass filter to selected subcarriers"""
         if subcarrier_indices is None:
-            # If no indices provided, use all or auto-select
             if self.config.use_all_subcarriers:
                 subcarrier_indices = range(csi_data.shape[1])
             else:
@@ -124,7 +300,7 @@ class HeartbeatExtractor:
             variance = np.var(mag_ts)
             
             # Calculate signal-to-noise ratio (relative to overall)
-            noise_est = np.std(np.diff(mag_ts)) / np.sqrt(2)  # Estimate noise
+            noise_est = np.std(np.diff(mag_ts)) / np.sqrt(2)
             if noise_est > 0:
                 snr = variance / (noise_est ** 2)
             else:
@@ -165,7 +341,7 @@ class HeartbeatExtractor:
         freqs = fftfreq(n_samples, 1/sampling_rate)
         
         # Only positive frequencies
-        positive_indices = (freqs > 0) & (freqs <= 5)  # Up to 5 Hz
+        positive_indices = (freqs > 0) & (freqs <= 5)
         freqs_positive = freqs[positive_indices]
         fft_positive = np.abs(fft_data[positive_indices])
         
@@ -182,26 +358,36 @@ class HeartbeatExtractor:
             # Find peak
             peak_idx = np.argmax(hr_fft)
             dominant_freq = hr_freqs[peak_idx]
-            heart_rate = dominant_freq * 60.0  # Convert to BPM
+            heart_rate = dominant_freq * 60.0
             
             # Confidence score (peak prominence)
             if len(hr_fft) > 2:
                 mean_hr_fft = np.mean(hr_fft)
                 peak_value = hr_fft[peak_idx]
                 confidence = peak_value / mean_hr_fft if mean_hr_fft > 0 else 0
+                confidence = np.clip((confidence - 1) / 9 * 100, 0, 100)
             else:
                 confidence = 0
+            
+            # Assess quality
+            quality_metrics = self.assess_signal_quality(signal_data)
+            
+            # Combined confidence
+            confidence = confidence * quality_metrics.get("quality", 0.5)
+            
         else:
             dominant_freq = 0
             heart_rate = 0
             confidence = 0
+            quality_metrics = {"quality": 0.0, "snr": 0.0}
         
         return {
             'heart_rate': heart_rate,
             'dominant_freq': dominant_freq,
             'confidence': confidence,
             'fft_frequencies': freqs_positive,
-            'fft_magnitudes': fft_positive
+            'fft_magnitudes': fft_positive,
+            'quality_metrics': quality_metrics
         }
     
     def compute_spectrogram(self, signal_data, nperseg=None):
@@ -209,7 +395,7 @@ class HeartbeatExtractor:
         if nperseg is None:
             nperseg = int(self.config.segment_duration * self.config.sampling_rate)
             if nperseg % 2 == 1:
-                nperseg += 1  # Make even
+                nperseg += 1
         
         noverlap = int(nperseg * self.config.overlap)
         
@@ -255,8 +441,10 @@ class HeartbeatExtractor:
             'avg_heart_rate': avg_hr
         }
     
+    # ============ NEW: UPDATED FULL ANALYSIS WITH OCCUPANCY ============
+    
     def run_full_analysis(self, csi_data, metadata=None, output_dir='heartbeat_analysis'):
-        """Run complete heartbeat extraction and analysis"""
+        """Run complete heartbeat extraction and analysis with occupancy detection"""
         Path(output_dir).mkdir(exist_ok=True)
         
         # Update sampling rate from metadata
@@ -268,6 +456,29 @@ class HeartbeatExtractor:
         print("HEARTBEAT EXTRACTION AND ANALYSIS")
         print("="*60)
         
+        # ============ NEW: Occupancy and motion detection ============
+        print("\n0. Detecting occupancy and motion...")
+        is_occupied, motion_level, energy = self.detect_occupancy_and_motion(csi_data)
+        self.occupancy = is_occupied
+        self.motion_level = motion_level
+        
+        print(f"   Occupancy: {is_occupied}")
+        print(f"   Motion level: {motion_level:.3f}")
+        print(f"   Energy: {energy:.3f}")
+        
+        if not is_occupied:
+            print("\n⚠️  No occupancy detected. Skipping heartbeat analysis.")
+            print("   (Check CSI signal quality or adjust occupancy threshold)")
+            return {
+                'heartbeat_signal': None,
+                'heart_rate': 0,
+                'confidence': 0,
+                'peaks': [],
+                'heart_rates': [],
+                'occupancy': False,
+                'motion_level': motion_level
+            }
+        
         # Step 1: Extract heartbeat signal
         print("\n1. Extracting heartbeat signal...")
         print(f"   Bandpass range: {self.config.bandpass_low}-{self.config.bandpass_high} Hz")
@@ -275,28 +486,54 @@ class HeartbeatExtractor:
         
         self.apply_bandpass_filter(csi_data)
         
-        # Step 2: Estimate heart rate
-        print("\n2. Estimating heart rate...")
-        hr_result = self.estimate_heart_rate(self.heartbeat_signal)
-        print(f"   Heart rate: {hr_result['heart_rate']:.1f} BPM")
-        print(f"   Confidence: {hr_result['confidence']:.2f}")
+        # Step 2: Assess signal quality
+        print("\n2. Assessing signal quality...")
+        quality_metrics = self.assess_signal_quality(self.heartbeat_signal)
+        self.signal_quality = quality_metrics.get("quality", 0.0)
+        print(f"   Signal quality: {self.signal_quality:.2f}")
+        print(f"   SNR: {quality_metrics.get('snr', 0):.2f}")
         
-        # Step 3: Compute spectrogram
-        print("\n3. Computing spectrogram...")
+        # Step 3: Estimate heart rate
+        print("\n3. Estimating heart rate...")
+        hr_result = self.estimate_heart_rate(self.heartbeat_signal)
+        heart_rate = hr_result['heart_rate']
+        confidence = hr_result['confidence']
+        self.confidence = confidence
+        
+        # Check if HR is valid
+        is_valid = (heart_rate > 0 and 
+                   heart_rate >= self.config.heart_rate_min and 
+                   heart_rate <= self.config.heart_rate_max and
+                   self.signal_quality > self.config.min_signal_quality)
+        
+        if is_valid:
+            print(f"   Heart rate: {heart_rate:.1f} BPM")
+            print(f"   Confidence: {confidence:.1f}%")
+            self.hr_history.append(heart_rate)
+            self.last_valid_bpm = heart_rate
+        else:
+            print(f"   ❌ Invalid heart rate: {heart_rate:.1f} BPM")
+            if self.signal_quality <= self.config.min_signal_quality:
+                print("      Signal quality too low")
+            if heart_rate <= 0:
+                print("      No heartbeat detected")
+        
+        # Step 4: Compute spectrogram
+        print("\n4. Computing spectrogram...")
         self.compute_spectrogram(self.heartbeat_signal)
         
-        # Step 4: Detect peaks
-        print("\n4. Detecting peaks...")
+        # Step 5: Detect peaks
+        print("\n5. Detecting peaks...")
         peak_result = self.detect_peaks(self.heartbeat_signal)
         print(f"   Peaks detected: {len(peak_result['peaks'])}")
         if len(peak_result['peaks']) > 0:
             print(f"   Average HR from peaks: {peak_result['avg_heart_rate']:.1f} BPM")
         
-        # Step 5: Generate plots
-        print("\n5. Generating visualizations...")
+        # Step 6: Generate plots
+        print("\n6. Generating visualizations...")
         self.create_heartbeat_plots(output_dir, hr_result, peak_result)
         
-        # Step 6: Save results
+        # Step 7: Save results
         self.save_results(output_dir, hr_result, peak_result)
         
         print("\n" + "="*60)
@@ -305,14 +542,18 @@ class HeartbeatExtractor:
         
         return {
             'heartbeat_signal': self.heartbeat_signal,
-            'heart_rate': hr_result['heart_rate'],
-            'confidence': hr_result['confidence'],
+            'heart_rate': heart_rate if is_valid else self.last_valid_bpm or 0,
+            'confidence': confidence if is_valid else 0,
             'peaks': peak_result['peaks'],
-            'heart_rates': peak_result['heart_rates']
+            'heart_rates': peak_result['heart_rates'],
+            'occupancy': is_occupied,
+            'motion_level': motion_level,
+            'signal_quality': self.signal_quality,
+            'is_valid': is_valid
         }
     
     def create_heartbeat_plots(self, output_dir, hr_result, peak_result):
-        """Create comprehensive heartbeat analysis plots"""
+        """Create comprehensive heartbeat analysis plots with occupancy info"""
         
         fig = plt.figure(figsize=(16, 12))
         
@@ -332,8 +573,9 @@ class HeartbeatExtractor:
         # 2. Frequency domain (FFT)
         ax2 = plt.subplot(3, 2, 2)
         ax2.plot(hr_result['fft_frequencies'], hr_result['fft_magnitudes'], 'b-', linewidth=1)
-        ax2.axvline(x=hr_result['dominant_freq'], color='r', linestyle='--', 
-                   label=f"Peak: {hr_result['heart_rate']:.1f} BPM")
+        if hr_result['heart_rate'] > 0:
+            ax2.axvline(x=hr_result['dominant_freq'], color='r', linestyle='--', 
+                       label=f"Peak: {hr_result['heart_rate']:.1f} BPM")
         ax2.set_xlabel('Frequency (Hz)')
         ax2.set_ylabel('Magnitude')
         ax2.set_title('Frequency Spectrum')
@@ -361,7 +603,6 @@ class HeartbeatExtractor:
         
         # 4. Heart rate over time (sliding window)
         ax4 = plt.subplot(3, 2, 4)
-        # Compute sliding window heart rates
         window_size = int(self.config.segment_duration * self.config.sampling_rate)
         hr_over_time = []
         time_points = []
@@ -374,8 +615,9 @@ class HeartbeatExtractor:
         
         if time_points:
             ax4.plot(time_points, hr_over_time, 'r-', linewidth=2)
-            ax4.axhline(y=hr_result['heart_rate'], color='b', linestyle='--', 
-                       label=f"Average: {hr_result['heart_rate']:.1f} BPM")
+            if hr_result['heart_rate'] > 0:
+                ax4.axhline(y=hr_result['heart_rate'], color='b', linestyle='--', 
+                           label=f"Average: {hr_result['heart_rate']:.1f} BPM")
             ax4.set_xlabel('Time (seconds)')
             ax4.set_ylabel('Heart Rate (BPM)')
             ax4.set_title('Heart Rate Over Time')
@@ -394,9 +636,12 @@ class HeartbeatExtractor:
             ax5.legend()
             ax5.grid(True, alpha=0.3)
         
-        # 6. Summary statistics
+        # 6. Summary statistics with occupancy info
         ax6 = plt.subplot(3, 2, 6)
         ax6.axis('off')
+        
+        quality_str = f"{self.signal_quality:.2f}" if self.signal_quality > 0 else "N/A"
+        motion_class = self.get_motion_classification(self.motion_level)
         
         stats_text = f"""
         HEARTBEAT ANALYSIS SUMMARY
@@ -405,9 +650,13 @@ class HeartbeatExtractor:
         Filter Order:    {self.config.filter_order}
         Sampling Rate:   {self.config.sampling_rate:.1f} Hz
         
+        OCCUPANCY:       {'✓' if self.occupancy else '✗'}
+        Motion Level:    {self.motion_level:.3f} ({motion_class})
+        Signal Quality:  {quality_str}
+        
         Heart Rate:      {hr_result['heart_rate']:.1f} BPM
+        Confidence:      {hr_result['confidence']:.1f}%
         Dominant Freq:   {hr_result['dominant_freq']:.2f} Hz
-        Confidence:      {hr_result['confidence']:.2f}
         
         Peaks Detected:  {len(peak_result['peaks'])}
         Avg HR (peaks):  {peak_result['avg_heart_rate']:.1f} BPM
@@ -419,7 +668,14 @@ class HeartbeatExtractor:
                 verticalalignment='top', fontfamily='monospace',
                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
         
-        plt.suptitle('Heartbeat Extraction Analysis', fontsize=14, fontweight='bold')
+        # Highlight occupancy status
+        if self.occupancy:
+            plt.suptitle('Heartbeat Extraction Analysis - OCCUPIED', 
+                        fontsize=14, fontweight='bold', color='green')
+        else:
+            plt.suptitle('Heartbeat Extraction Analysis - VACANT', 
+                        fontsize=14, fontweight='bold', color='red')
+        
         plt.tight_layout()
         
         # Save plot
@@ -466,24 +722,76 @@ class HeartbeatExtractor:
             header=f'Hearbeat Signal (rate={self.config.sampling_rate}Hz)'
         )
         
-        # Save summary
+        # Save summary with occupancy info
         with open(f'{output_dir}/heartbeat_summary.txt', 'w') as f:
             f.write("HEARTBEAT EXTRACTION SUMMARY\n")
             f.write("="*50 + "\n\n")
             f.write(f"Bandpass Range:  {self.config.bandpass_low:.1f}-{self.config.bandpass_high:.1f} Hz\n")
             f.write(f"Filter Order:    {self.config.filter_order}\n")
             f.write(f"Sampling Rate:   {self.config.sampling_rate:.1f} Hz\n\n")
+            f.write("OCCUPANCY AND MOTION\n")
+            f.write("-"*30 + "\n")
+            f.write(f"Occupancy:       {self.occupancy}\n")
+            f.write(f"Motion Level:    {self.motion_level:.3f}\n")
+            f.write(f"Signal Quality:  {self.signal_quality:.2f}\n\n")
+            f.write("HEART RATE\n")
+            f.write("-"*30 + "\n")
             f.write(f"Heart Rate:      {hr_result['heart_rate']:.1f} BPM\n")
             f.write(f"Dominant Freq:   {hr_result['dominant_freq']:.2f} Hz\n")
-            f.write(f"Confidence:      {hr_result['confidence']:.2f}\n\n")
+            f.write(f"Confidence:      {hr_result['confidence']:.1f}%\n\n")
             f.write(f"Peaks Detected:  {len(peak_result['peaks'])}\n")
             f.write(f"Avg HR (peaks):  {peak_result['avg_heart_rate']:.1f} BPM\n")
             f.write(f"Signal Duration: {len(self.heartbeat_signal) / self.config.sampling_rate:.1f} s\n")
         
         print(f"  Saved results to '{output_dir}/heartbeat_summary.txt'")
+    
+    # ============ NEW: REAL-TIME UPDATE METHOD ============
+    
+    def update_realtime(self, csi_data: np.ndarray, timestamp: float) -> Dict:
+        """
+        Real-time update for live monitoring.
+        
+        Args:
+            csi_data: Single frame or batch of CSI data
+            timestamp: Current timestamp
+        
+        Returns:
+            Dict with current metrics
+        """
+        # Store frame for rolling analysis
+        # (Implementation depends on how you want to handle rolling windows)
+        # This is a simplified version
+        
+        # Detect occupancy and motion
+        is_occupied, motion_level, energy = self.detect_occupancy_and_motion(
+            csi_data if csi_data.ndim == 2 else csi_data.reshape(1, -1)
+        )
+        self.occupancy = is_occupied
+        self.motion_level = motion_level
+        
+        # Only process HR if occupied
+        if is_occupied and self.signal_quality > self.config.min_signal_quality:
+            hr_result = self.estimate_heart_rate(self.heartbeat_signal)
+            heart_rate = hr_result['heart_rate']
+            confidence = hr_result['confidence']
+            
+            if heart_rate > 0:
+                self.hr_history.append(heart_rate)
+                self.last_valid_bpm = heart_rate
+        else:
+            heart_rate = self.last_valid_bpm or 0
+            confidence = 0
+        
+        return {
+            'heart_rate': heart_rate,
+            'confidence': confidence,
+            'occupancy': is_occupied,
+            'motion_level': motion_level,
+            'signal_quality': self.signal_quality,
+            'energy': energy
+        }
 
 
-# Integration with Main Pipeline
 class HeartbeatFilter:
     """Wrapper for integrating heartbeat extraction with existing pipeline"""
     
@@ -514,7 +822,7 @@ class HeartbeatFilter:
     def filter_csi_data(self, csi_data):
         """Apply bandpass filter to CSI magnitude data"""
         if self.sos is None:
-            self.design_filter(100.0)  # Default
+            self.design_filter(100.0)
         
         # Use magnitude for heartbeat detection
         magnitudes = np.abs(csi_data)
@@ -530,7 +838,7 @@ class HeartbeatFilter:
 # Example usage
 if __name__ == "__main__":
     # Test with synthetic data
-    print("Testing heartbeat extraction with synthetic data...")
+    print("Testing heartbeat extraction with occupancy detection...")
     
     # Generate synthetic heartbeat signal
     fs = 100.0
@@ -540,27 +848,30 @@ if __name__ == "__main__":
     
     # Create synthetic heartbeat with noise
     synthetic_heartbeat = np.sin(2 * np.pi * heart_freq * t) * 10
-    synthetic_heartbeat += np.sin(4 * np.pi * heart_freq * t) * 3  # Harmonic
-    synthetic_heartbeat += np.random.randn(len(t)) * 2  # Noise
+    synthetic_heartbeat += np.sin(4 * np.pi * heart_freq * t) * 3
+    synthetic_heartbeat += np.random.randn(len(t)) * 2
     
     # Add respiratory component (0.2 Hz)
     synthetic_heartbeat += np.sin(2 * np.pi * 0.2 * t) * 5
     
-    # Create synthetic CSI data (64 subcarriers, some with signal)
+    # Create synthetic CSI data (64 subcarriers)
     synthetic_csi = np.zeros((len(t), 64), dtype=complex)
     for sc in range(64):
-        # Add some variation across subcarriers
         scale = 1 + 0.3 * np.sin(sc / 10)
         synthetic_csi[:, sc] = (100 + synthetic_heartbeat * scale) * np.exp(1j * sc * 0.1)
     
-    # Configure and run
+    # Configure and run with occupancy detection
     config = HeartbeatConfig()
     config.sampling_rate = fs
     config.bandpass_low = 0.5
     config.bandpass_high = 2.0
+    config.occupancy_energy_threshold = 0.01
     
     extractor = HeartbeatExtractor(config)
     result = extractor.run_full_analysis(synthetic_csi, {'rate': fs}, 'test_heartbeat')
     
-    print(f"\nDetected heart rate: {result['heart_rate']:.1f} BPM (expected: {heart_rate} BPM)")
-    print(f"Confidence: {result['confidence']:.2f}")
+    print(f"\nResults:")
+    print(f"  Occupancy: {result['occupancy']}")
+    print(f"  Motion level: {result['motion_level']:.3f}")
+    print(f"  Heart rate: {result['heart_rate']:.1f} BPM")
+    print(f"  Confidence: {result['confidence']:.1f}%")
