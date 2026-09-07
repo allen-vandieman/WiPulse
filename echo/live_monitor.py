@@ -719,46 +719,60 @@ class LiveState:
             / mean_amp
         )
 
-    def get_dashboard_snapshot(
-        self,
-    ):
+    def get_dashboard_snapshot(self):
+        """Return a consistent dashboard snapshot without nested locking."""
 
         with self.lock:
 
-            result = dict(
-                self.hr_result
-            )
+            # Calculate packet rate directly while the lock is held.
+            if len(self.pkt_times) >= 2:
+                dt = (
+                    self.pkt_times[-1]
+                    - self.pkt_times[0]
+                )
 
-            frame = (
-                self.last_frame
-            )
-
-            mean_hist = list(
-                self.mean_amp_hist
-            )
-
-            per_sc_hist = list(
-                self.per_sc_amp_hist
-            )
+                if dt > 0:
+                    live_rate = (
+                        len(self.pkt_times) - 1
+                    ) / dt
+                else:
+                    live_rate = 0.0
+            else:
+                live_rate = 0.0
 
             return {
                 "n_seen": self.n_seen,
                 "n_decoded": self.n_decoded,
                 "n_errors": self.n_errors,
-                "live_rate": self.live_rate,
-                "last_frame": frame,
-                "mean_amp_hist": mean_hist,
-                "per_sc_amp_hist": per_sc_hist,
-                "hr_result": result,
+
+                "live_rate": live_rate,
+
+                "last_frame": self.last_frame,
+
+                "mean_amp_hist": list(
+                    self.mean_amp_hist
+                ),
+
+                "per_sc_amp_hist": list(
+                    self.per_sc_amp_hist
+                ),
+
+                "hr_result": dict(
+                    self.hr_result
+                ),
+
                 "hr_result_time": (
                     self.hr_result_time
                 ),
+
                 "hr_processing": (
                     self.hr_processing
                 ),
+
                 "hr_processing_count": (
                     self.hr_processing_count
                 ),
+
                 "hr_processing_time": (
                     self.hr_processing_time
                 ),
