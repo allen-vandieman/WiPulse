@@ -16,6 +16,30 @@ project/
 
 ## Running the Live Monitor
 
+ - Bare minimum
+
+```bash
+sudo python3 live_monitor.py \
+    --iface wlan0 \
+    --chip 43455c0 \
+    --bw 80 \
+    --capture-mode complex
+```
+
+ - Fine tune occupancy detection
+
+ ```bash
+sudo python live_monitor.py --iface wlan0 --chip 43455c0 --bw 80 --capture-mode complex --occupancy-diversity 0.0001 --occupancy-threshold 0.00013
+
+sudo python live_monitor.py --iface wlan0 --chip 43455c0 --bw 80 --capture-mode complex --occupancy-diversity 0.0001 --occupancy-threshold 0.00028
+
+# Vary --occupancy-threshold
+# and  --occupancy-diversity
+# Bigger stricter, lower lax
+ ```
+
+ - Maximum options
+
 ```bash
 sudo python3 live_monitor.py \
     --iface wlan0 \
@@ -28,6 +52,19 @@ sudo python3 live_monitor.py \
     --hr-subcarriers 12 \
     --hr-percentile 20 \
     --capture-mode complex
+```
+
+ - Options
+
+ ```bash
+ # Option A: Lower HR range (for resting)
+--hr-low 0.7 --hr-high 2.0
+
+# Option B: Tighter subcarrier selection (better quality)
+--hr-subcarriers 8
+
+# Option C: Longer window (more stable)
+--hr-window 35.0
 ```
 
 ## Live Monitor 
@@ -44,6 +81,8 @@ complex CSI → bad-subcarrier cleaning/interpolation → amplitude → Hampel �
 |-decoder.py
 |
 |-filters.py
+|
+|-heartbeat_extraction.py   # recently added for live view HR
 ```
 
 ## Serial Ground truth recorder
