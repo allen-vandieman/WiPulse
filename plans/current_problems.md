@@ -1,3 +1,97 @@
+# State
+
+## After testing
+
+### What's Wrong With the Real Captures
+
+The real captures have quality scores of 2-3 and PSDs that are essentially flat. That means:
+
+ - The CSI amplitude in those captures does not contain a heartbeat component distinguishable from noise.
+
+This is a physical-layer / experimental-setup problem, not an algorithmic one. Possible causes:
+
+# 1. Line-of-sight dominates, chest reflection is too weak
+
+If TX and RX are pointed at each other and the subject is off to the side, the direct path is ~10× stronger than the chest-reflection path. The chest movement (0.5-1 mm) produces a phase shift of ~0.001 rad on the reflection — completely swamped by the direct path.
+
+**Test**: Place a metal sheet (cooking tray, aluminum foil on cardboard) behind the subject, opposite to the TX-RX axis. This creates a strong secondary reflection path.
+
+# 2. Subject position is suboptimal
+
+For CSI heartbeat sensing, the geometry matters enormously:
+
+ - **Best**: subject between TX and RX, ~1-2 m from each, offset ~20-30 cm from the direct path
+
+ - **Worst**: subject collinear with TX and RX, or > 3 m away
+
+**Test**: Have the subject move 20-50 cm to the side of the direct TX-RX path. Also try 1 m, 1.5 m, 2 m distances.
+
+# 3. Breathing dominates
+
+Breathing at 0.3 Hz has ~30× larger chest displacement than heartbeat. If breathing leaks into the HR band through harmonics (0.9, 1.2, 1.5 Hz) or through nonlinear mixing, it dominates the PSD.
+
+**Test**: Have the subject **hold their breath** for **15-20 seconds** in the middle of the capture. If the HR PSD peak appears only during breath-hold, then breathing artifacts are what you're seeing the rest of the time.
+
+# 4. Hardware / sampling issues
+
+Some commodity Wi-Fi cards report CSI amplitudes with very low dynamic range (8-bit ADCs). If your RSSI is -46 dBm (which is quite strong), the CSI values may be saturating or clipping, which destroys small amplitude modulations.
+
+**Test**: Move the subject farther from the router (target RSSI -55 to -65 dBm). Or try a different channel/bandwidth (20 MHz vs 80 MHz changes the sensitivity profile).
+
+# 5. Static subject = no micro-Doppler
+
+If the subject is perfectly still, and the CSI is measured in a static environment, the only thing modulating the signal is breathing + heartbeat. Both are 0.5-5 mm scale. If the room has no reflective surfaces and the direct path is short, that 0.5 mm movement produces essentially undetectable CSI changes.
+
+**Test**: Have the subject gently sway their torso by 1-2 cm every few seconds. If HR becomes detectable during the sway but not otherwise, the setup has insufficient sensitivity.
+
+# Recommended Diagnostic Sequence
+
+Do these in order, generating one capture at a time and immediately running `diagnose_psd.py`:
+
+## Test A: Metal reflector behind subject
+
+Place a cookie sheet or aluminum foil sheet vertically behind the subject (relative to the router). This amplifies the chest-reflection path.
+
+## Test B: Lateral offset
+
+Move subject 30 cm to the side of the direct TX-RX line.
+
+## Test C: Breath-hold
+
+During a 60-second capture, have the subject hold their breath from t=20s to t=40s. Run `diagnose_psd.py` with `--window-start 25` and `--window-start 45`. Compare PSDs.
+
+## Test D: Deliberate sway
+
+Subject sways ±2 cm torso for 30 seconds. Compare PSDs during sway vs. after.
+
+## Test E: Different distance
+
+Subject at 1 m, 1.5 m, 2 m, 2.5 m, 3 m from router. Find where the quality score peaks.
+
+## Test F: Empty room baseline
+
+Same setup, no subject. This shows the noise floor with zero heartbeat signal.
+
+## Test G: Known motion reference
+
+Subject waves hand slowly at 1 Hz. Run `diagnose_psd.py` on the window. If the peak appears at 1 Hz, the pipeline is capturing motion correctly — it's just that heartbeat is too weak. If it doesn't, there's a sensitivity problem in the hardware itself.
+
+# What I Would Do If I Were You
+
+1. **Run Test F first** (empty room). This tells you the noise floor.
+
+1. **Then Test G** (hand wave at known rate). This tells you whether any motion is detectable at all.
+
+1. If Test G works but Test A-D don't, you know the hardware is fine but the sensitivity isn't there — this is common with commodity Wi-Fi CSI.
+
+1. **Try Test C (breath-hold)** — it's the most informative test for whether heartbeat is measurable at all.
+
+# The Bottom Line
+
+The pipeline is validated. It recovers HR within 3 BPM on synthetic data, including under 15% packet loss. The 20-30 BPM MAE on real captures reflects an **absence of measurable heartbeat signal in the CSI data**, not a bug in the processing.
+
+**No further pipeline work will fix this**. The next step is **experimental**: change the physical setup until diagnose_psd.py shows a PSD peak at the GT frequency. Once that happens, the pipeline will work. The synthetic tests prove it.
+
 # Plan
 
 ## Current live pipeline

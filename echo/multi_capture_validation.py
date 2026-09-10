@@ -1675,8 +1675,36 @@ def run_test(gt_type="bpm_samples"):
         #     r"captures\06-09-2026\Allen-S,0,1-T1\ground_truth_20260906_131258.csv"
         # ),
         (
+            r"captures\07-09-2026\Allen-N,0,0-T1\csi_capture_20260907_211939.csv",
+            r"captures\07-09-2026\Allen-N,0,0-T1\ground_truth_20260907_211942.csv"
+        ),
+        (
+            r"captures\07-09-2026\Allen-N,0,1-T1\csi_capture_20260907_204311.csv",
+            r"captures\07-09-2026\Allen-N,0,1-T1\ground_truth_20260907_204314.csv"
+        ),
+        (
+            r"captures\07-09-2026\Allen-N,0,-1-T1\csi_capture_20260907_203329.csv",
+            r"captures\07-09-2026\Allen-N,0,-1-T1\ground_truth_20260907_203332.csv"
+        ),
+        (
+            r"captures\07-09-2026\Allen-S,0,0-T1\csi_capture_20260907_211154.csv",
+            r"captures\07-09-2026\Allen-S,0,0-T1\ground_truth_20260907_211157.csv"
+        ),
+        (
+            r"captures\07-09-2026\Allen-S,0,1-T1\csi_capture_20260907_205349.csv",
+            r"captures\07-09-2026\Allen-S,0,1-T1\ground_truth_20260907_205352.csv"
+        ),
+        (
+            r"captures\07-09-2026\Allen-S,0,-1-T1\csi_capture_20260907_210505.csv",
+            r"captures\07-09-2026\Allen-S,0,-1-T1\ground_truth_20260907_210508.csv"
+        ),
+        (
             r"captures\06-09-2026\Allen-N,0,-1-T1\csi_capture_20260906_234541.csv",
             r"captures\06-09-2026\Allen-N,0,-1-T1\ground_truth_20260906_234544.csv"
+        ),
+        (
+            r"captures\06-09-2026\Allen-S,0,1-T1\csi_capture_20260906_131236.csv",
+            r"captures\06-09-2026\Allen-S,0,1-T1\ground_truth_20260906_131258.csv"
         ),
     ]
 

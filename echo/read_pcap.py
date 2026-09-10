@@ -31,120 +31,94 @@ class PCAPDataLoader:
         self.metadata = None
         
     def load(self):
-        """Load PCAP and extract CSI data"""
+        """Load PCAP and extract CSI data (vectorized per-packet parse)."""
         if not Path(self.pcap_file).exists():
             raise FileNotFoundError(f"File '{self.pcap_file}' not found!")
-        
+
         print(f"Reading PCAP file: {self.pcap_file}")
-        
+
         packets = rdpcap(self.pcap_file)
         print(f"Total packets in PCAP: {len(packets)}")
-        
-        # Extract CSI data
-        all_complex = []
-        metadata = {}
-        valid_packets = 0
-        
+
+        hoffset = self.config.HOFFSET
+        nfft = self.config.NFFT
+        need_words = hoffset + nfft
+        need_bytes = need_words * 4
+
+        raw_payloads = []
         for pkt in packets:
             raw = bytes(pkt)
-            
-            # Need enough data for metadata extraction
-            if len(raw) < 60:
+            if len(raw) < need_bytes:
                 continue
-            
-            # Convert packet bytes into uint32 words
-            usable_len = (len(raw) // 4) * 4
-            words = np.frombuffer(raw[:usable_len], dtype="<u4")
-            
-            if len(words) < (self.config.HOFFSET + self.config.NFFT):
-                continue
-            
-            # Extract CSI
-            H = words[self.config.HOFFSET:self.config.HOFFSET + self.config.NFFT]
-            hout = H.view(np.int16)
-            
-            # Extract metadata from first packet
-            if not metadata:
-                payload8 = words.view(np.uint8)
-                if len(payload8) >= 60:
-                    metadata['sequence'] = int.from_bytes(payload8[52:54], "little")
-                    core_ss = int.from_bytes(payload8[54:56], "little")
-                    metadata['core'] = core_ss & 0x7
-                    metadata['nss'] = (core_ss >> 3) & 0x7
-                    metadata['chanspec'] = int.from_bytes(payload8[56:58], "little")
-                    metadata['chipver'] = int.from_bytes(payload8[58:60], "little")
-                    metadata['bandwidth'] = self.config.BW
-                    metadata['n_subcarriers'] = self.config.NFFT
-                    
-                    print(f"Metadata extracted:")
-                    print(f"  Sequence: {metadata['sequence']}")
-                    print(f"  Core: {metadata['core']}")
-                    print(f"  NSS: {metadata['nss']}")
-                    print(f"  Chanspec: 0x{metadata['chanspec']:04X}")
-                    print(f"  ChipVer: 0x{metadata['chipver']:04X}")
-            
-            # Convert interleaved int16 -> complex CSI
-            iq = hout.reshape(-1, 2)
-            complex_csi = (
-                iq[:, 0].astype(np.float64) +
-                1j * iq[:, 1].astype(np.float64)
-            )
-            
-            all_complex.append(complex_csi)
-            valid_packets += 1
-        
-        # Convert to numpy array
-        self.csi_data = np.array(all_complex)
-        
-        # Add more metadata
-        if self.csi_data.shape[0] > 0:
-            metadata['n_packets'] = self.csi_data.shape[0]
-            metadata['n_subcarriers'] = self.csi_data.shape[1]
-            metadata['rate'] = valid_packets / 1.0  # Will be refined if timestamps available
-            
-            # Estimate duration and rate (if timestamps not available)
-            # PCAP doesn't have timestamps in the same way, so we estimate from packet count
-            # Assuming ~100 packets per second (typical for CSI)
-            metadata['duration'] = valid_packets / 93.5  # Approximate for 80MHz
-            metadata['rate'] = valid_packets / metadata['duration']
-        else:
-            metadata['n_packets'] = 0
-            metadata['n_subcarriers'] = 0
-            metadata['duration'] = 0
-            metadata['rate'] = 0
-        
-        self.metadata = metadata
-        
-        if self.csi_data.shape[0] == 0:
+            raw_payloads.append(raw[:need_bytes])
+
+        metadata = {}
+        valid_packets = len(raw_payloads)
+
+        if valid_packets == 0:
+            self.csi_data = np.zeros((0, nfft), dtype=np.complex128)
+            self.metadata = {"n_packets": 0, "n_subcarriers": nfft}
             raise ValueError("No valid CSI packets found in PCAP!")
-        
+
+        # Bulk-convert all packets at once.
+        big = np.frombuffer(
+            b"".join(raw_payloads), dtype="<u4"
+        ).reshape(valid_packets, need_words)
+
+        H = big[:, hoffset:hoffset + nfft].copy()
+        hout = H.view(np.int16).reshape(valid_packets, nfft, 2)
+
+        complex_csi = (
+            hout[:, :, 0].astype(np.float64)
+            + 1j * hout[:, :, 1].astype(np.float64)
+        )
+
+        # Metadata from the first packet's byte view.
+        first = raw_payloads[0]
+        metadata['sequence'] = int.from_bytes(first[52:54], "little")
+        core_ss = int.from_bytes(first[54:56], "little")
+        metadata['core'] = core_ss & 0x7
+        metadata['nss'] = (core_ss >> 3) & 0x7
+        metadata['chanspec'] = int.from_bytes(first[56:58], "little")
+        metadata['chipver'] = int.from_bytes(first[58:60], "little")
+        metadata['bandwidth'] = self.config.BW
+        metadata['n_subcarriers'] = nfft
+
+        self.csi_data = complex_csi
+
+        metadata['n_packets'] = complex_csi.shape[0]
+        metadata['n_subcarriers'] = complex_csi.shape[1]
+        metadata['duration'] = complex_csi.shape[0] / 93.5
+        metadata['rate'] = (
+            complex_csi.shape[0] / metadata['duration']
+            if metadata['duration'] > 0 else 0.0
+        )
+
+        self.metadata = metadata
+
         print(f"\nExtracted {valid_packets} valid CSI packets")
         print(f"CSI data shape: {self.csi_data.shape}")
-        
-        # Print min/max values (like MATLAB read_pcap)
-        hout_flat = self.csi_data.view(np.float64).reshape(-1)
-        print(f"\nComplex Value Statistics:")
         print(f"  Min I value = {self.csi_data.real.min():.2f}")
         print(f"  Max I value = {self.csi_data.real.max():.2f}")
         print(f"  Min Q value = {self.csi_data.imag.min():.2f}")
         print(f"  Max Q value = {self.csi_data.imag.max():.2f}")
-        print(f"  Total samples = {self.csi_data.size}")
-        
-        # Print strongest subcarriers (like read_pcap.py)
+
         if self.csi_data.shape[0] > 0:
             magnitudes = np.abs(self.csi_data)
             idx_pkt = min(99, self.csi_data.shape[0] - 1)
             strongest_idx = np.argsort(magnitudes[idx_pkt])[::-1][:15]
-            
+
             print(f"\n15 Strongest Subcarriers (packet {idx_pkt + 1})")
             print("-" * 60)
             print(f"{'Subcarrier':<12} {'Magnitude':<12} {'I':<12} {'Q':<12}")
             print("-" * 60)
             for i in strongest_idx:
-                print(f"{i:>5}      {magnitudes[idx_pkt, i]:>10.2f}  "
-                      f"{self.csi_data[idx_pkt, i].real:>10.2f}  "
-                      f"{self.csi_data[idx_pkt, i].imag:>10.2f}")
-        
+                print(
+                    f"{i:>5}      {magnitudes[idx_pkt, i]:>10.2f}  "
+                    f"{self.csi_data[idx_pkt, i].real:>10.2f}  "
+                    f"{self.csi_data[idx_pkt, i].imag:>10.2f}"
+                )
+
         return self.csi_data, self.metadata
 
 
