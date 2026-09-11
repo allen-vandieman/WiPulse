@@ -8,30 +8,36 @@ Zoom into a single window of one capture and show:
     2. Welch PSD with detected peak and (optionally) GT marker
     3. Subcarrier quality ranking
 
-Supports three modes:
+Input formats:
+    .csv           - CSI captures written by live_monitor.py
+    .pcap / .pcapng - Nexmon CSI PCAP captures
 
+Modes:
     (a) With ground truth CSV (default):
-        python diagnose_psd.py --csi <csv> --gt <csv> \\
+        python diagnose_psd.py --csi <csv|pcap> --gt <csv> \\
             --window-start 20 --window-seconds 10
 
     (b) With a known HR (synthetic testing):
-        python diagnose_psd.py --csi <csv> --true-hr 90 \\
+        python diagnose_psd.py --csi <csv|pcap> --true-hr 90 \\
             --window-start 20 --window-seconds 10
 
     (c) Baseline-only, no GT:
-        python diagnose_psd.py --csi <csv> --no-gt \\
+        python diagnose_psd.py --csi <csv|pcap> --no-gt \\
             --window-start 20 --window-seconds 10
 
     Window can also be selected by absolute timestamp:
         --ts-start 1788806029.0 --window-seconds 10
 
 Output:
-    diagnose_psd.png (or --out <path>)
+    If --out is not given, a unique default name is derived from the
+    input file stem and the window offset:
+        diagnose_psd_<stem>_w<offset>.png
 """
 
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -42,9 +48,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy import signal
 
-# Reuse the existing pipeline classes.
-from read_csv_csi import CSIDataLoader
+# Pipeline for processing.
 from windowed_psd_analysis import HeartbeatPipeline
+
+# Shared clipping check.
+from read_pcap import check_clipping
 
 
 # ----------------------------------------------------------------------
@@ -59,15 +67,20 @@ TOP_N = 5
 
 
 # ----------------------------------------------------------------------
-# Load CSI
+# Load CSI — dispatches by extension
 # ----------------------------------------------------------------------
 
-def load_csi(csi_path: Path):
+def _load_csv_csi(csi_path: Path):
+    """Load a CSV capture written by live_monitor.py."""
+    from read_csv_csi import CSIDataLoader
+
     loader = CSIDataLoader(str(csi_path))
     csi_data, meta = loader.load()
 
     if hasattr(loader, "df") and "ts" in loader.df.columns:
-        ts = pd.to_numeric(loader.df["ts"], errors="coerce").to_numpy(float)
+        ts = pd.to_numeric(
+            loader.df["ts"], errors="coerce"
+        ).to_numpy(dtype=float)
     else:
         raise ValueError("CSI CSV has no 'ts' column")
 
@@ -75,11 +88,54 @@ def load_csi(csi_path: Path):
     ts = ts[valid]
     csi_data = csi_data[valid]
 
+    if len(ts) != len(csi_data):
+        raise ValueError("Timestamp / CSI length mismatch in CSV")
+
     return csi_data, ts, meta
 
 
+def _load_pcap_csi(csi_path: Path):
+    """Load a PCAP/PCAPNG capture written by live_monitor.py."""
+    from read_pcap import PCAPDataLoader
+
+    loader = PCAPDataLoader(str(csi_path))
+    csi_data, meta = loader.load()
+
+    ts = None
+
+    if hasattr(loader, "csi_timestamps") and loader.csi_timestamps is not None:
+        ts = np.asarray(loader.csi_timestamps, dtype=float)
+    elif "timestamps" in meta:
+        ts = np.asarray(meta["timestamps"], dtype=float)
+
+    if ts is None or len(ts) != len(csi_data):
+        rate = float(meta.get("rate", 0.0)) or 93.5
+        print(
+            f"Warning: no per-packet PCAP timestamps — "
+            f"using synthetic {rate:.2f} Hz grid"
+        )
+        ts = np.arange(len(csi_data), dtype=float) / rate
+
+    return csi_data, ts, meta
+
+
+def load_csi(csi_path: Path):
+    """Load CSI data from CSV or PCAP; returns (csi, timestamps, meta)."""
+    suffix = csi_path.suffix.lower()
+
+    if suffix == ".csv":
+        return _load_csv_csi(csi_path)
+    if suffix in (".pcap", ".pcapng"):
+        return _load_pcap_csi(csi_path)
+
+    raise ValueError(
+        f"Unsupported capture format: {suffix}. "
+        f"Expected .csv, .pcap, or .pcapng"
+    )
+
+
 # ----------------------------------------------------------------------
-# Simple uniform resample (matches multi_capture_validation behaviour)
+# Uniform resample
 # ----------------------------------------------------------------------
 
 def resample_to_uniform(csi, ts, target_fs=TARGET_FS):
@@ -108,27 +164,19 @@ def resample_to_uniform(csi, ts, target_fs=TARGET_FS):
 
 
 # ----------------------------------------------------------------------
-# Analyze ONE window
+# Analyze one window
 # ----------------------------------------------------------------------
 
 def analyze_window(csi, ts, gt_df, ws, we):
-    """
-    csi, ts : uniform CSI and timestamps
-    gt_df   : DataFrame with ts,bpm  (may contain NaN BPM values)
-    ws, we  : window start/end in the CSI time base
-    """
     mask = (ts >= ws) & (ts < we)
     seg = csi[mask]
     seg_ts = ts[mask]
 
     if len(seg) < 20:
-        raise RuntimeError(
-            f"Only {len(seg)} samples in window — too few"
-        )
+        raise RuntimeError(f"Only {len(seg)} samples in window — too few")
 
     pipeline = HeartbeatPipeline(TARGET_FS)
 
-    # Build amplitude channels only (simpler, and it's the best method)
     amp = pipeline.extract_amplitude(seg)
     channels = [amp[:, sc] for sc in range(amp.shape[1])]
     names = [f"amp_sc{sc}" for sc in range(amp.shape[1])]
@@ -142,7 +190,6 @@ def analyze_window(csi, ts, gt_df, ws, we):
         processed, quality, top_n=TOP_N, align_polarity=True,
     )
 
-    # Welch PSD on the fused signal
     x = fused - np.mean(fused)
     freqs, psd = signal.welch(
         x,
@@ -163,7 +210,6 @@ def analyze_window(csi, ts, gt_df, ws, we):
     peak_freq = float(band_freqs[peak_idx])
     peak_bpm = peak_freq * 60.0
 
-    # GT BPM in this window
     gt_mask = (gt_df["ts"] >= ws) & (gt_df["ts"] < we)
     gt_vals = gt_df.loc[gt_mask, "bpm"].to_numpy(dtype=float)
     gt_vals = gt_vals[np.isfinite(gt_vals)]
@@ -194,21 +240,42 @@ def analyze_window(csi, ts, gt_df, ws, we):
 
 
 # ----------------------------------------------------------------------
+# Safe savefig with fallback name
+# ----------------------------------------------------------------------
+
+def _safe_savefig(fig, out_file, dpi=150):
+    """
+    Save a figure, falling back to a timestamped name if the target
+    file is locked (common on Windows when an image viewer keeps a
+    handle open).
+    """
+    out_path = Path(out_file)
+
+    try:
+        fig.savefig(out_path, dpi=dpi)
+        return out_path
+    except OSError as e:
+        ts = datetime.now().strftime("%H%M%S")
+        alt = out_path.with_name(
+            f"{out_path.stem}_{ts}{out_path.suffix}"
+        )
+        print(
+            f"Warning: could not write '{out_path}' ({e}). "
+            f"Falling back to '{alt}'"
+        )
+        try:
+            fig.savefig(alt, dpi=dpi)
+            return alt
+        except OSError as e2:
+            print(f"Warning: fallback also failed ({e2}). Not saving plot.")
+            return None
+
+
+# ----------------------------------------------------------------------
 # Plot
 # ----------------------------------------------------------------------
 
-def plot_diagnostic(
-    res,
-    ws,
-    we,
-    csi_path,
-    gt_path,
-    out_file,
-    mode="gt_csv",
-):
-    """
-    mode: "gt_csv", "true_hr", or "baseline"
-    """
+def plot_diagnostic(res, ws, we, csi_path, gt_path, out_file, mode="gt_csv"):
     fig, axes = plt.subplots(3, 1, figsize=(14, 12))
 
     # ---------------- Panel 1: Waveform ----------------
@@ -238,14 +305,12 @@ def plot_diagnostic(
         color="steelblue", linewidth=1.5, label="HR band",
     )
 
-    # GT frequency marker (skipped in baseline mode)
     if np.isfinite(res["gt_freq"]):
         ax.axvline(
             res["gt_freq"], color="green", linestyle="--", alpha=0.8,
             label=f"GT = {res['gt_bpm']:.1f} BPM ({res['gt_freq']:.3f} Hz)",
         )
 
-    # Detected peak
     ax.axvline(
         res["peak_freq"], color="red", linestyle=":", alpha=0.9,
         label=f"CSI peak = {res['peak_bpm']:.1f} BPM ({res['peak_freq']:.3f} Hz)",
@@ -259,7 +324,6 @@ def plot_diagnostic(
     ax.grid(True, alpha=0.3, which="both")
     ax.legend(loc="upper right", fontsize=9)
 
-    # Annotation box
     if np.isfinite(res["gt_bpm"]):
         err = res["peak_bpm"] - res["gt_bpm"]
         box_text = f"|CSI - GT| = {abs(err):.1f} BPM"
@@ -287,10 +351,8 @@ def plot_diagnostic(
     ax.set_title("Top 20 subcarriers by quality score")
     ax.grid(True, alpha=0.3, axis="x")
 
-    # ---------------- Summary ----------------
-    gt_file_display = (
-        gt_path if gt_path else "<none>"
-    )
+    # ---------------- Summary box ----------------
+    gt_file_display = gt_path if gt_path else "<none>"
 
     if mode == "baseline":
         gt_line = "GT BPM      : — (baseline mode, no GT)"
@@ -309,15 +371,15 @@ def plot_diagnostic(
 
     summary = (
         f"mode        : {mode}\n"
-        f"window      : {ws:.2f} → {we:.2f}  "
-        f"({we - ws:.1f} s)\n"
+        f"window      : {ws:.2f} → {we:.2f}  ({we - ws:.1f} s)\n"
         f"window samples: {len(res['seg'])}\n"
         f"CSI peak    : {res['peak_bpm']:.2f} BPM "
         f"({res['peak_freq']:.4f} Hz)\n"
         f"{gt_line}\n"
         f"{err_line}\n"
         f"CSI file    : {Path(csi_path).name}\n"
-        f"GT  file    : {Path(gt_file_display).name if gt_file_display and gt_file_display != '<none>' else '<none>'}"
+        f"GT  file    : "
+        f"{Path(gt_file_display).name if gt_file_display and gt_file_display != '<none>' else '<none>'}"
     )
 
     fig.text(
@@ -332,10 +394,12 @@ def plot_diagnostic(
         fontsize=14, fontweight="bold",
     )
     plt.tight_layout(rect=(0, 0.10, 1, 0.97))
-    plt.savefig(out_file, dpi=150)
+
+    saved_path = _safe_savefig(fig, out_file, dpi=150)
     plt.close()
 
-    print(f"\nSaved: {out_file}")
+    if saved_path is not None:
+        print(f"\nSaved: {saved_path}")
     print(summary)
 
 
@@ -347,13 +411,16 @@ def main():
     ap = argparse.ArgumentParser(
         description=(
             "PSD diagnostic for CSI heartbeat analysis. "
-            "Supports GT CSV, known true HR, or baseline-only mode."
+            "Accepts .csv, .pcap, or .pcapng captures."
         )
     )
 
-    ap.add_argument("--csi", required=True, help="CSI capture CSV")
+    ap.add_argument(
+        "--csi", required=True,
+        help="CSI capture file (.csv, .pcap, or .pcapng)"
+    )
 
-    # GT source flags.  Mutually exclusive to avoid ambiguity.
+    # GT source flags
     gt_group = ap.add_mutually_exclusive_group()
     gt_group.add_argument(
         "--gt", default=None,
@@ -363,7 +430,7 @@ def main():
     )
     gt_group.add_argument(
         "--true-hr", type=float, default=None,
-        help="Known heart rate in BPM. Used as synthetic GT. "
+        help="Known heart rate in BPM (synthetic GT). "
              "Intended for synthetic / self-test captures."
     )
     gt_group.add_argument(
@@ -375,7 +442,7 @@ def main():
     win_group = ap.add_mutually_exclusive_group()
     win_group.add_argument(
         "--window-start", type=float, default=None,
-        help="Window start in seconds from CSI start (default: 20)"
+        help="Window start in seconds from capture start (default: 20)"
     )
     win_group.add_argument(
         "--ts-start", type=float, default=None,
@@ -387,19 +454,31 @@ def main():
         help="Window length in seconds"
     )
     ap.add_argument(
-        "--out", default="diagnose_psd.png",
-        help="Output PNG path"
+        "--out", default=None,
+        help=(
+            "Output PNG path. If not provided, a unique name is derived "
+            "from the CSI file stem and the window offset."
+        )
     )
 
     args = ap.parse_args()
 
     # ----------------------------------------------------------------
-    # Load CSI
+    # Load CSI (auto-detect format)
     # ----------------------------------------------------------------
-    print(f"Loading CSI: {args.csi}")
-    csi, ts, meta = load_csi(Path(args.csi))
+    csi_path = Path(args.csi)
+    print(f"Loading CSI: {csi_path}")
+
+    csi, ts, meta = load_csi(csi_path)
+
     print(f"  {len(csi)} packets, {csi.shape[1]} subcarriers")
     print(f"  rate: {meta.get('rate', 0):.2f} Hz")
+    if len(ts) > 1:
+        print(f"  time span: {ts[-1] - ts[0]:.2f} s")
+
+    # Clip check on the raw CSI (before any resampling).
+    # read_pcap already prints this for PCAP; this ensures CSV gets it too.
+    check_clipping(csi, verbose=True)
 
     # Resample to uniform grid
     csi_u, ts_u = resample_to_uniform(csi, ts, TARGET_FS)
@@ -441,7 +520,6 @@ def main():
         gt_path_display = args.gt
 
     else:
-        # No GT source given at all — fall back to baseline mode.
         mode = "baseline"
         print("Loading GT: <no --gt provided — baseline mode>")
         gt_df = pd.DataFrame({
@@ -456,28 +534,36 @@ def main():
     if args.ts_start is not None:
         ws = args.ts_start
         we = ws + args.window_seconds
+        win_tag = f"ts{int(args.ts_start)}"
     else:
         offset = args.window_start if args.window_start is not None else 20.0
         ws = ts_u[0] + offset
         we = ws + args.window_seconds
+        win_tag = f"w{int(offset)}"
 
     print(f"\nAnalyzing window: {ws:.3f} → {we:.3f}")
 
     # ----------------------------------------------------------------
-    # Analyze
+    # Resolve output path
+    # ----------------------------------------------------------------
+    if args.out is None:
+        csi_stem = csi_path.stem
+        out_file = Path(f"diagnose_psd_{csi_stem}_{win_tag}.png")
+    else:
+        out_file = Path(args.out)
+
+    # ----------------------------------------------------------------
+    # Analyze + plot
     # ----------------------------------------------------------------
     res = analyze_window(csi_u, ts_u, gt_df, ws, we)
 
-    # ----------------------------------------------------------------
-    # Plot
-    # ----------------------------------------------------------------
     plot_diagnostic(
         res,
         ws,
         we,
         args.csi,
         gt_path_display,
-        args.out,
+        out_file,
         mode=mode,
     )
 

@@ -64,11 +64,13 @@ sudo nexutil -Iwlan0 -s500 -b -l34 -v$CSIPARAMS
 
 ### Capture
 
+Head to the [capture](/setup/CAPTURE.md) notes.
+
 ```bash
 sudo tcpdump -i wlan0 udp port 5500 -w csi_capture.pcap
 ```
 
-or use [app](/app/README.md).
+or use [app](/echo/README.md).
 
 ### Verify
 
