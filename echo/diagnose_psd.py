@@ -5,23 +5,28 @@ diagnose_psd.py
 
 Zoom into a single window of one capture and show:
     1. CSI heartbeat waveform (top subcarriers)
-    2. Welch PSD with detected peak and GT marker
-    3. GT BPM over the same window
-    4. Subcarrier quality ranking
+    2. Welch PSD with detected peak and (optionally) GT marker
+    3. Subcarrier quality ranking
 
-Usage:
-    python diagnose_psd.py \\
-        --csi <csi_capture.csv> \\
-        --gt  <ground_truth.csv> \\
-        --window-start 20 --window-seconds 10
+Supports three modes:
 
-    # or by absolute timestamp
-    python diagnose_psd.py \\
-        --csi <csv> --gt <csv> \\
-        --ts-start 1788378695.0 --ts-end 1788378705.0
+    (a) With ground truth CSV (default):
+        python diagnose_psd.py --csi <csv> --gt <csv> \\
+            --window-start 20 --window-seconds 10
+
+    (b) With a known HR (synthetic testing):
+        python diagnose_psd.py --csi <csv> --true-hr 90 \\
+            --window-start 20 --window-seconds 10
+
+    (c) Baseline-only, no GT:
+        python diagnose_psd.py --csi <csv> --no-gt \\
+            --window-start 20 --window-seconds 10
+
+    Window can also be selected by absolute timestamp:
+        --ts-start 1788806029.0 --window-seconds 10
 
 Output:
-    diagnose_psd.png
+    diagnose_psd.png (or --out <path>)
 """
 
 from __future__ import annotations
@@ -74,7 +79,7 @@ def load_csi(csi_path: Path):
 
 
 # ----------------------------------------------------------------------
-# Simple uniform resample (matches what multi_capture_validation does)
+# Simple uniform resample (matches multi_capture_validation behaviour)
 # ----------------------------------------------------------------------
 
 def resample_to_uniform(csi, ts, target_fs=TARGET_FS):
@@ -109,7 +114,7 @@ def resample_to_uniform(csi, ts, target_fs=TARGET_FS):
 def analyze_window(csi, ts, gt_df, ws, we):
     """
     csi, ts : uniform CSI and timestamps
-    gt_df   : DataFrame with ts,bpm
+    gt_df   : DataFrame with ts,bpm  (may contain NaN BPM values)
     ws, we  : window start/end in the CSI time base
     """
     mask = (ts >= ws) & (ts < we)
@@ -160,9 +165,15 @@ def analyze_window(csi, ts, gt_df, ws, we):
 
     # GT BPM in this window
     gt_mask = (gt_df["ts"] >= ws) & (gt_df["ts"] < we)
-    gt_bpm_vals = gt_df.loc[gt_mask, "bpm"].to_numpy()
-    gt_bpm_median = float(np.median(gt_bpm_vals)) if len(gt_bpm_vals) else np.nan
-    gt_freq = gt_bpm_median / 60.0 if np.isfinite(gt_bpm_median) else np.nan
+    gt_vals = gt_df.loc[gt_mask, "bpm"].to_numpy(dtype=float)
+    gt_vals = gt_vals[np.isfinite(gt_vals)]
+
+    if len(gt_vals) > 0:
+        gt_bpm_median = float(np.median(gt_vals))
+        gt_freq = gt_bpm_median / 60.0
+    else:
+        gt_bpm_median = np.nan
+        gt_freq = np.nan
 
     return {
         "seg": seg,
@@ -178,7 +189,7 @@ def analyze_window(csi, ts, gt_df, ws, we):
         "peak_bpm": peak_bpm,
         "gt_bpm": gt_bpm_median,
         "gt_freq": gt_freq,
-        "gt_bpm_vals": gt_bpm_vals,
+        "gt_bpm_vals": gt_vals,
     }
 
 
@@ -186,7 +197,18 @@ def analyze_window(csi, ts, gt_df, ws, we):
 # Plot
 # ----------------------------------------------------------------------
 
-def plot_diagnostic(res, ws, we, csi_path, gt_path, out_file):
+def plot_diagnostic(
+    res,
+    ws,
+    we,
+    csi_path,
+    gt_path,
+    out_file,
+    mode="gt_csv",
+):
+    """
+    mode: "gt_csv", "true_hr", or "baseline"
+    """
     fig, axes = plt.subplots(3, 1, figsize=(14, 12))
 
     # ---------------- Panel 1: Waveform ----------------
@@ -204,7 +226,6 @@ def plot_diagnostic(res, ws, we, csi_path, gt_path, out_file):
     # ---------------- Panel 2: PSD ----------------
     ax = axes[1]
 
-    # Show the whole useful band 0-5 Hz
     full = (res["freqs"] >= 0.05) & (res["freqs"] <= 5.0)
     ax.semilogy(
         res["freqs"][full],
@@ -212,13 +233,12 @@ def plot_diagnostic(res, ws, we, csi_path, gt_path, out_file):
         color="gray", linewidth=1.0, label="full PSD",
     )
 
-    # Highlight the HR band
     ax.semilogy(
         res["band_freqs"], res["band_psd"],
         color="steelblue", linewidth=1.5, label="HR band",
     )
 
-    # GT frequency marker
+    # GT frequency marker (skipped in baseline mode)
     if np.isfinite(res["gt_freq"]):
         ax.axvline(
             res["gt_freq"], color="green", linestyle="--", alpha=0.8,
@@ -239,17 +259,20 @@ def plot_diagnostic(res, ws, we, csi_path, gt_path, out_file):
     ax.grid(True, alpha=0.3, which="both")
     ax.legend(loc="upper right", fontsize=9)
 
-    # Annotate frequency error
+    # Annotation box
     if np.isfinite(res["gt_bpm"]):
         err = res["peak_bpm"] - res["gt_bpm"]
-        ax.text(
-            0.02, 0.95,
-            f"|CSI - GT| = {abs(err):.1f} BPM",
-            transform=ax.transAxes, fontsize=10,
-            family="monospace",
-            verticalalignment="top",
-            bbox=dict(boxstyle="round", facecolor="lightyellow", alpha=0.9),
-        )
+        box_text = f"|CSI - GT| = {abs(err):.1f} BPM"
+    else:
+        box_text = f"CSI peak = {res['peak_bpm']:.1f} BPM"
+
+    ax.text(
+        0.02, 0.95, box_text,
+        transform=ax.transAxes, fontsize=10,
+        family="monospace",
+        verticalalignment="top",
+        bbox=dict(boxstyle="round", facecolor="lightyellow", alpha=0.9),
+    )
 
     # ---------------- Panel 3: Subcarrier quality ----------------
     ax = axes[2]
@@ -265,18 +288,36 @@ def plot_diagnostic(res, ws, we, csi_path, gt_path, out_file):
     ax.grid(True, alpha=0.3, axis="x")
 
     # ---------------- Summary ----------------
+    gt_file_display = (
+        gt_path if gt_path else "<none>"
+    )
+
+    if mode == "baseline":
+        gt_line = "GT BPM      : — (baseline mode, no GT)"
+        err_line = "error       : —"
+    else:
+        gt_line = (
+            f"GT BPM      : {res['gt_bpm']:.2f} "
+            f"({len(res['gt_bpm_vals'])} samples"
+            + (
+                f", σ={np.std(res['gt_bpm_vals']):.2f})"
+                if len(res["gt_bpm_vals"]) > 1
+                else ")"
+            )
+        )
+        err_line = f"error       : {res['peak_bpm'] - res['gt_bpm']:+.2f} BPM"
+
     summary = (
+        f"mode        : {mode}\n"
         f"window      : {ws:.2f} → {we:.2f}  "
         f"({we - ws:.1f} s)\n"
         f"window samples: {len(res['seg'])}\n"
         f"CSI peak    : {res['peak_bpm']:.2f} BPM "
         f"({res['peak_freq']:.4f} Hz)\n"
-        f"GT BPM      : {res['gt_bpm']:.2f} "
-        f"({len(res['gt_bpm_vals'])} samples, "
-        f"σ={np.std(res['gt_bpm_vals']):.2f})\n"
-        f"error       : {res['peak_bpm'] - res['gt_bpm']:+.2f} BPM\n"
+        f"{gt_line}\n"
+        f"{err_line}\n"
         f"CSI file    : {Path(csi_path).name}\n"
-        f"GT  file    : {Path(gt_path).name}"
+        f"GT  file    : {Path(gt_file_display).name if gt_file_display and gt_file_display != '<none>' else '<none>'}"
     )
 
     fig.text(
@@ -303,16 +344,40 @@ def plot_diagnostic(res, ws, we, csi_path, gt_path, out_file):
 # ----------------------------------------------------------------------
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--csi", required=True, help="CSI capture CSV")
-    ap.add_argument("--gt", required=True, help="Ground truth CSV")
+    ap = argparse.ArgumentParser(
+        description=(
+            "PSD diagnostic for CSI heartbeat analysis. "
+            "Supports GT CSV, known true HR, or baseline-only mode."
+        )
+    )
 
-    g = ap.add_mutually_exclusive_group()
-    g.add_argument(
+    ap.add_argument("--csi", required=True, help="CSI capture CSV")
+
+    # GT source flags.  Mutually exclusive to avoid ambiguity.
+    gt_group = ap.add_mutually_exclusive_group()
+    gt_group.add_argument(
+        "--gt", default=None,
+        help="Ground truth CSV (ts,bpm). "
+             "If omitted along with --true-hr and --no-gt, "
+             "runs in baseline-only mode."
+    )
+    gt_group.add_argument(
+        "--true-hr", type=float, default=None,
+        help="Known heart rate in BPM. Used as synthetic GT. "
+             "Intended for synthetic / self-test captures."
+    )
+    gt_group.add_argument(
+        "--no-gt", action="store_true",
+        help="Force baseline-only mode (no GT overlay)."
+    )
+
+    # Window selection
+    win_group = ap.add_mutually_exclusive_group()
+    win_group.add_argument(
         "--window-start", type=float, default=None,
         help="Window start in seconds from CSI start (default: 20)"
     )
-    g.add_argument(
+    win_group.add_argument(
         "--ts-start", type=float, default=None,
         help="Absolute timestamp for window start"
     )
@@ -323,29 +388,71 @@ def main():
     )
     ap.add_argument(
         "--out", default="diagnose_psd.png",
-        help="Output PNG"
+        help="Output PNG path"
     )
+
     args = ap.parse_args()
 
-    # ---- Load CSI ----
+    # ----------------------------------------------------------------
+    # Load CSI
+    # ----------------------------------------------------------------
     print(f"Loading CSI: {args.csi}")
     csi, ts, meta = load_csi(Path(args.csi))
     print(f"  {len(csi)} packets, {csi.shape[1]} subcarriers")
     print(f"  rate: {meta.get('rate', 0):.2f} Hz")
 
-    # ---- Resample to uniform 100 Hz ----
+    # Resample to uniform grid
     csi_u, ts_u = resample_to_uniform(csi, ts, TARGET_FS)
     print(f"  resampled to {len(csi_u)} samples at {TARGET_FS:.1f} Hz")
 
-    # ---- Load GT ----
-    print(f"Loading GT: {args.gt}")
-    gt_df = pd.read_csv(args.gt)
-    gt_df["ts"] = pd.to_numeric(gt_df["ts"], errors="coerce")
-    gt_df["bpm"] = pd.to_numeric(gt_df["bpm"], errors="coerce")
-    gt_df = gt_df.dropna().sort_values("ts").reset_index(drop=True)
-    print(f"  {len(gt_df)} BPM samples")
+    # ----------------------------------------------------------------
+    # Load / construct GT
+    # ----------------------------------------------------------------
+    if args.no_gt:
+        mode = "baseline"
+        print("Loading GT: <baseline mode — no ground truth>")
+        gt_df = pd.DataFrame({
+            "ts":  [ts_u[0] - 10.0, ts_u[-1] + 10.0],
+            "bpm": [np.nan, np.nan],
+        })
+        gt_path_display = ""
 
-    # ---- Determine window ----
+    elif args.true_hr is not None:
+        mode = "true_hr"
+        print(f"Loading GT: <synthetic GT = {args.true_hr} BPM>")
+        gt_df = pd.DataFrame({
+            "ts":  [ts_u[0] - 10.0, ts_u[-1] + 10.0],
+            "bpm": [args.true_hr, args.true_hr],
+        })
+        gt_path_display = ""
+
+    elif args.gt is not None:
+        mode = "gt_csv"
+        print(f"Loading GT: {args.gt}")
+        gt_df = pd.read_csv(args.gt)
+        if "ts" not in gt_df.columns or "bpm" not in gt_df.columns:
+            raise ValueError(
+                "Ground truth CSV must contain 'ts' and 'bpm' columns."
+            )
+        gt_df["ts"] = pd.to_numeric(gt_df["ts"], errors="coerce")
+        gt_df["bpm"] = pd.to_numeric(gt_df["bpm"], errors="coerce")
+        gt_df = gt_df.dropna().sort_values("ts").reset_index(drop=True)
+        print(f"  {len(gt_df)} BPM samples")
+        gt_path_display = args.gt
+
+    else:
+        # No GT source given at all — fall back to baseline mode.
+        mode = "baseline"
+        print("Loading GT: <no --gt provided — baseline mode>")
+        gt_df = pd.DataFrame({
+            "ts":  [ts_u[0] - 10.0, ts_u[-1] + 10.0],
+            "bpm": [np.nan, np.nan],
+        })
+        gt_path_display = ""
+
+    # ----------------------------------------------------------------
+    # Determine window
+    # ----------------------------------------------------------------
     if args.ts_start is not None:
         ws = args.ts_start
         we = ws + args.window_seconds
@@ -356,9 +463,23 @@ def main():
 
     print(f"\nAnalyzing window: {ws:.3f} → {we:.3f}")
 
+    # ----------------------------------------------------------------
+    # Analyze
+    # ----------------------------------------------------------------
     res = analyze_window(csi_u, ts_u, gt_df, ws, we)
 
-    plot_diagnostic(res, ws, we, args.csi, args.gt, args.out)
+    # ----------------------------------------------------------------
+    # Plot
+    # ----------------------------------------------------------------
+    plot_diagnostic(
+        res,
+        ws,
+        we,
+        args.csi,
+        gt_path_display,
+        args.out,
+        mode=mode,
+    )
 
 
 if __name__ == "__main__":

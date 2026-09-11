@@ -250,3 +250,13 @@ third-order -> amount of poles (capacitors)
 a digital smoothing and filtering method that fits a low-degree polynomial to a sliding window of data points using linear least squares. It removes high-frequency noise from a signal while better preserving peak heights, widths, and high-frequency details compared to standard moving average filters.
 
 ![Savitzky-Golay](img/processing/Savitzky-Golay.jpg)
+
+### Test processing pipeline
+
+After successfully setting up a processing pipeline, an next step is to test the pipeline with a synthetically generated CSI data, where i know what is expected and see what the pipeline produce.
+
+Ideally our goals should be:
+
+![Output graph](img/processing/diagnose_psd-72-lossy.png)
+
+THe image above is an example output where we can see the detected heart rate and ground truth data are within a 3 BPM error. We can also see a clear bump near the HR and a very good SNR.

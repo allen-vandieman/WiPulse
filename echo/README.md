@@ -1,17 +1,42 @@
 # ECHO
 
+1. [Application](#application)
+1. [Running the Live Monitor](#running-the-live-monitor)
+1. [Live Monitor](#live-monitor)
+1. [Serial Ground truth recorder](#serial-ground-truth-recorder)
+1. [Quick Start](#quick-start)
+    1. [Launch CSI capture](#launch-csi-capture)
+1. [Validation](#validation)
+    1. [Generate synthetic](#generate-synthetic)
+    1. [Ground truth](#ground-truth)
+    1. [Diagnose psd (IMPORTANT)](#diagnose-psd-important)
+        1. [Usage](#usage)
+    1. [Multi capture validation](#multi-capture-validation)
+    1. [Multi capture validation run](#multi-capture-validation-v2)
+        1. [Add files to test](#add-files-to-test)
+        1. [For Old Beat Timestamp](#for-old-beat-timestamp-csvs)
+1. [Key Parameters to Tune](#key-parameters-to-tune)
+1. [Success Criteria](#success-criteria)
+    1. [Metrics Explained](#metrics-explained)
+
 ## Application
 
 ```
-project/
-├── live_monitor.py          # Main dashboard (UPDATED with integration)
-├── heartbeat_extraction.py  # Enhanced with occupancy/motion (UPDATED)
-├── filters.py               # CSI filtering utilities (unchanged)
-├── decoder.py               # CSI decoding (unchanged)
-├── read_csv_csi.py          # CSV loading (unchanged)
-├── windowed_psd_analysis.py # Offline analysis (unchanged)
-├── pi_serial_recorder.py    # Ground truth recording (unchanged)
-└── output/                  # Output directory
+echo/
+├── live_monitor.py                         # Main dashboard (UPDATED with integration)
+├── heartbeat_extraction.py                 # Enhanced with occupancy/motion (UPDATED)
+├── filters.py                              # CSI filtering utilities (unchanged)
+├── decoder.py                              # CSI decoding (unchanged)
+├── read_csv_csi.py                         # CSV loading (unchanged)
+├── read_pcap.py                            # CSV loading (unchanged)
+├── windowed_psd_analysis.py                # Offline analysis (unchanged)
+├── pi_serial_recorder.py                   # Ground truth recording (unchanged)
+├── diagnose_gt.py                          # Diagnose ground truth variation < 2 BPM
+├── diagnose_psd.py                         # Diagnose CSI capture and graph
+├── make_synthetic.py                       # Generate syntehic CSI to assist with verifying pipeline
+├── multi_capture_validation.py             # OLD validation, drop gap size > 10ms
+├── multi_capture_validation_resilient.py   # NEW validation, drop gap size > 200ms
+└── output/                     # Output directory
 ```
 
 ## Running the Live Monitor
@@ -37,7 +62,6 @@ sudo python live_monitor.py --iface wlan0 --chip 43455c0 --bw 80 --capture-mode 
 # and  --occupancy-diversity
 # Bigger stricter, lower lax
  ```
-
  - Maximum options
 
 ```bash
@@ -89,6 +113,10 @@ complex CSI → bad-subcarrier cleaning/interpolation → amplitude → Hampel �
 
 `pi_serial_recorder.py` receivers heartbeat information from two sensors managed by an Arduino Uno R4 Wifi, and send the average Heartrate to the Raspberry PI.
 
+```bash
+python pi_serial_recorder.py
+```
+
 # Quick Start
 
 ## Launch CSI capture
@@ -100,6 +128,88 @@ Quick launch CSI and ground truth capture with
 ```
 
 # Validation
+
+## Generate synthetic
+
+Make CSI + GT to run with diagnose_psd.py
+
+```bash
+# 90 BPM, 120 seconds, clean
+python make_synthetic.py --hr 90 --duration 120 --out-prefix synthetic_90
+
+# 72 BPM with realistic packet loss
+python make_synthetic.py --hr 72 --packet-loss 0.15 --out-prefix synthetic_72_lossy
+
+# 120 BPM (tachycardia scenario)
+python make_synthetic.py --hr 120 --out-prefix synthetic_120
+```
+
+## Ground truth
+
+Tell me if my GT data is stable.
+
+Look at the *third panel*. If the **median window-σ** is more than ~4-5 BPM, *GT noise* alone caps your achievable **MAE**.
+
+```
+python diagnose_gt.py synthetic_120_gt.csv
+```
+
+## Diagnose psd (IMPORTANT)
+
+Diagnose captured CSI data.
+
+What to look out for:
+
+1. How close the red line (CSI) and green lines (GT) are from each other. Error < 5 BPM
+1. Clear bumb around red line, most signal at heart-rate vs noise around HR
+1. High signal to noice ratio (qaulity score) > 20
+1. CSI peak -> Heart-rate
+1. Sinusoidal fused CSI amplitude (back and forth movement of chest)
+
+![Goals](/img/processing/Good%20CSI.PNG)
+
+### Usage
+
+Normal
+
+```bash
+python diagnose_psd.py ^
+    --csi synthetic_90_csi.csv ^
+    --gt  synthetic_90_gt.csv ^
+    --window-start 20 --window-seconds 10
+```
+
+ - When to start analysis `--window-start`
+
+ - Window size `--window-seconds`
+
+Baseline
+
+```bash
+python diagnose_psd.py --csi baseline_empty_room_csi.csv --window-start 60
+```
+
+Empty room
+
+```bash
+python diagnose_psd.py ^
+    --csi baseline_empty_room_csi.csv ^
+    --no-gt ^
+    --window-start 60 --window-seconds 10 ^
+    --out baseline_empty_room.png
+```
+
+Synthetic self-test with a known HR
+
+```bash
+python diagnose_psd.py ^
+    --csi synthetic_90_csi.csv ^
+    --true-hr 90 ^
+    --window-start 60 ^
+    --out synthetic_90_diag.png
+```
+
+## Multi capture validation
 
 ```
 /multi_capture_validation.py
