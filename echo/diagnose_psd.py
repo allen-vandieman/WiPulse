@@ -460,6 +460,15 @@ def main():
             "from the CSI file stem and the window offset."
         )
     )
+    ap.add_argument(
+        "--drop-guard", type=int, default=0,
+        help=(
+            "Drop this many subcarriers from each edge before analysis. "
+            "Nexmon's lowest/highest subcarriers are guard tones and can "
+            "carry extreme values that trigger false clipping. "
+            "Recommended: 2."
+        )
+    )
 
     args = ap.parse_args()
 
@@ -476,8 +485,22 @@ def main():
     if len(ts) > 1:
         print(f"  time span: {ts[-1] - ts[0]:.2f} s")
 
-    # Clip check on the raw CSI (before any resampling).
-    # read_pcap already prints this for PCAP; this ensures CSV gets it too.
+    # Optional: drop guard subcarriers from each edge.
+    if args.drop_guard > 0:
+        g = args.drop_guard
+        if csi.shape[1] <= 2 * g:
+            raise ValueError(
+                f"--drop-guard {g} would leave no subcarriers "
+                f"(only {csi.shape[1]} present)"
+            )
+        csi = csi[:, g:-g]
+        print(
+            f"  dropped {g} guard SCs on each side "
+            f"-> {csi.shape[1]} subcarriers remain"
+        )
+
+    # Clip check AFTER guard removal, so the banner reflects
+    # what will actually be analyzed.
     check_clipping(csi, verbose=True)
 
     # Resample to uniform grid
