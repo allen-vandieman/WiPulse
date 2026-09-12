@@ -64,7 +64,7 @@ sudo nexutil -Iwlan0 -s500 -b -l34 -v$CSIPARAMS
 
 ### Capture
 
-Head to the [capture](/setup/CAPTURE.md) notes.
+Raw capture
 
 ```bash
 sudo tcpdump -i wlan0 udp port 5500 -w csi_capture.pcap
@@ -72,7 +72,34 @@ sudo tcpdump -i wlan0 udp port 5500 -w csi_capture.pcap
 
 or use [app](/echo/README.md).
 
-### Verify
+```bash
+cd ~/work
+
+source env/bin/activate
+
+cd WiPulse/echo
+```
+
+#### Live Monitor
+
+```bash
+sudo python live_monitor.py --iface wlan0 --chip 43455c0 --bw 80 --capture-mode complex
+# press 'c' to start recording, 'c' again to stop, 'q' to quit
+```
+
+#### Serial Ground truth recorder
+
+```bash
+python pi_serial_recorder.py
+```
+
+#### Quick start both monitor and serial recoder
+
+```bash
+./start_wipulse_capture.sh
+```
+
+### Verify RX
 
 ```bash
 nexutil -m
@@ -82,7 +109,7 @@ lsmod | grep brcm
 iw dev
 ```
 
-### Reload driver
+### Reload RX driver
 
 ```bash
 cd $NEXMON_ROOT/patches/bcm43455c0/7_45_189/nexmon_csi
@@ -90,7 +117,7 @@ cd $NEXMON_ROOT/patches/bcm43455c0/7_45_189/nexmon_csi
 make -f Makefile.rpi reload-full
 ```
 
-## Restore
+## Restore TX and Tester
 
 ```bash
 # Restore lite
