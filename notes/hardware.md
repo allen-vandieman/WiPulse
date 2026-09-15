@@ -154,3 +154,20 @@ This is a great test for **sensitivity**, which directly relates to the human-ch
 |2°|	< 2|	Below noise|
 
 **The angle at which the quality score drops below ~3 is roughly the minimum detectable motion**. Compare that to what a chest produces (roughly equivalent to a foil rotation of 0.1-0.5°) and you'll know whether a human will work.
+
+### CSI capture results
+
+Note the 3 distint *bumps* at each expected **Harmonic frequency**.
+
+0.5 Hz = 30 BPM
+1 Hz   = 60 BPM
+1.5 Hz = 90 BPM (dominant frequency)
+2 Hz   = 120 BPM
+
+#### 10 Second window
+
+![10-sec-window](/img/processing/diagnose_psd_csi_capture_servo_3m_20Mhz_w10.png)
+
+#### 30 Second window
+
+![30-sec-window](/img/processing/diagnose_psd_csi_capture_servo_3m_20Mhz_w30.png)

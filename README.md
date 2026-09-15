@@ -259,3 +259,12 @@ Ideally our goals should be:
 ![Output graph](img/processing/diagnose_psd-72-lossy.png)
 
 THe image above is an example output where we can see the detected heart rate and ground truth data are within a 3 BPM error. We can also see a clear bump near the HR and a very good SNR.
+
+### Harmonics
+
+Harmonics are any frequencies that are integer (whole-number) multiples of a base fundamental frequency.
+
+**Harmonic Distortion and Noise**
+
+When a perfect sine wave signal passes through an imperfect or "non-linear" system (like an overdriven amplifier or a saturated transformer), the output signal gets squashed or distorted. This distortion creates unwanted new frequencies at harmonic intervals.
+
