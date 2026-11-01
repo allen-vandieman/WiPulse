@@ -1,5 +1,0 @@
-Before
-HR 80bpm
-
-After
-HR 77bpm
