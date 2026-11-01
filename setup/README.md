@@ -31,9 +31,21 @@ sudo airmon-ng start wlan0
 ```
 
 Load Pi on that channel
-
+- 80 MHz
 ```bash
 sudo iw dev wlan0mon set channel 36 80MHz
+
+iw dev wlan0mon info
+```
+- 40 MHz
+```bash
+sudo iw dev wlan0mon set channel 44 HT40+
+
+iw dev wlan0mon info
+```
+- 20 MHZ
+```bash
+sudo iw dev wlan0mon set channel 40
 
 iw dev wlan0mon info
 ```
@@ -52,13 +64,27 @@ sudo python3 rssi-receiver.py
 
 ## Receiver RX
 
-### Load
+### Setup
 
 ```bash
 sudo ifconfig wlan0 up
 sudo nexutil -Iwlan0 -m1
+```
 
+### Load
+- 80 MHz
+```bash
 CSIPARAMS=$(makecsiparams -c 36/80 -C 1 -N 1 -m 02:11:22:33:44:55)
+sudo nexutil -Iwlan0 -s500 -b -l34 -v$CSIPARAMS
+```
+- 40 MHz
+```bash
+CSIPARAMS=$(makecsiparams -c 44/40 -C 1 -N 1 -m 02:11:22:33:44:55)
+sudo nexutil -Iwlan0 -s500 -b -l34 -v$CSIPARAMS
+```
+- 20 MHz
+```bash
+CSIPARAMS=$(makecsiparams -c 40/20 -C 1 -N 1 -m 02:11:22:33:44:55)
 sudo nexutil -Iwlan0 -s500 -b -l34 -v$CSIPARAMS
 ```
 
@@ -77,7 +103,7 @@ cd ~/work
 
 source env/bin/activate
 
-cd WiPulse/echo
+cd WiPulse/falcon
 ```
 
 #### Live Monitor
@@ -85,6 +111,12 @@ cd WiPulse/echo
 ```bash
 sudo python live_monitor.py --iface wlan0 --chip 43455c0 --bw 80 --capture-mode complex
 # press 'c' to start recording, 'c' again to stop, 'q' to quit
+```
+
+#### Servo Monitor
+
+```bash
+sudo python servo_frequency_monitor.py   --iface wlan0   --chip 43455c0   --bw 80
 ```
 
 #### Serial Ground truth recorder
