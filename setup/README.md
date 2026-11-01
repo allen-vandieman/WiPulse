@@ -119,6 +119,12 @@ sudo python live_monitor.py --iface wlan0 --chip 43455c0 --bw 80 --capture-mode 
 sudo python servo_frequency_monitor.py   --iface wlan0   --chip 43455c0   --bw 80
 ```
 
+- Dashboard
+
+```
+http://25.0.0.77:8080
+```
+
 #### Serial Ground truth recorder
 
 ```bash
