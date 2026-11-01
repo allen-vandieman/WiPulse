@@ -3,11 +3,17 @@
 
 Uses the project's decoder.py and the same Nexmon CSI UDP format as live_monitor.py.
 Receives/scans packets in one thread, estimates the dominant frequency from an
-independent rolling CSI window in a second thread, and displays a curses UI.
+independent rolling CSI window in a second thread, and displays a curses UI plus a real-time HTML dashboard on the LAN.
 
-Real hardware:
-  python servo_frequency_monitor.py --iface wlan0 --expected-hz 1.0
+Real hardware (Nexmon 20 MHz, Raspberry Pi):
+  sudo python3 servo_frequency_monitor.py --iface wlan0 --bw 20 --expected-hz 1.0
   python servo_frequency_monitor.py --iface Ethernet --expected-hz 1.0
+
+Nexmon injected UDP can be visible to tcpdump while Scapy's 'udp port 5500'
+capture filter drops every frame. By default this monitor receives all frames
+from the selected interface and checks UDP port/source IP in Python.
+Use --bpf-filter only if verified to work on your interface. --debug-capture
+prints additional capture counters without changing this default.
 
 Demo rehearsal (clearly labelled synthetic input):
   python servo_frequency_monitor.py --simulate --expected-hz 1.2
@@ -16,6 +22,7 @@ Demo rehearsal (clearly labelled synthetic input):
 Optional prerecorded Nexmon UDP PCAP playback (clearly labelled REPLAY):
   python servo_frequency_monitor.py --pcap captures/example.pcap --expected-hz 1.0
 
+Web: http://<Pi-LAN-IP>:8080 (servo_dashboard.html must be beside this script).
 Keys: c start/stop CSV evidence capture, +/- expected frequency by 0.1 Hz,
       0 hide expected frequency, q quit.
 
@@ -31,6 +38,9 @@ import curses
 import logging
 import math
 import os
+import json
+import socket
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
 import time
 from collections import deque
@@ -167,6 +177,10 @@ class State:
         self.keep_seconds = max(25.0, seconds + 4.0)
         self.last_frame = None
         self.total_seen = self.total_decoded = self.errors = self.ignored = 0
+        # Staged counters allow diagnosing traffic even when decoding is 0.
+        self.udp_seen = self.port_seen = self.source_seen = 0
+        self.last_udp = self.last_decode_error = self.last_non_udp = ""
+        self.last_payload_bytes = 0
         self.packet_times = deque(maxlen=200)
         self.last_rx_mono = 0.0
         self.start_wall = time.time()
@@ -236,7 +250,151 @@ class State:
                         frame=self.last_frame, err=self.last_error,
                         expected=self.expected, frequency_history=list(self.frequency_history),
                         finished=self.finished,
-                        finished_at=self.finished_at)
+                        finished_at=self.finished_at,
+                        udp_seen=self.udp_seen, port_seen=self.port_seen,
+                        source_seen=self.source_seen, last_udp=self.last_udp,
+                        last_decode_error=self.last_decode_error,
+                        last_non_udp=self.last_non_udp,
+                        last_payload_bytes=self.last_payload_bytes)
+
+
+
+# ============================================================================
+# READ-ONLY BROWSER DASHBOARD (Python standard library; no Flask required)
+# ============================================================================
+
+def lan_ip_hint():
+    """Best-effort LAN address for display only; HTTP binds independently."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            # No data is sent. UDP connect chooses the outbound local IP.
+            sock.connect(("192.0.2.1", 1))
+            return sock.getsockname()[0]
+    except OSError:
+        try:
+            ip = socket.gethostbyname(socket.gethostname())
+            return ip if not ip.startswith('127.') else 'PI_IP_ADDRESS'
+        except OSError:
+            return 'PI_IP_ADDRESS'
+
+
+def web_payload(state, args):
+    """Serialize only explicitly approved fields, never a CSI packet or raw IQ."""
+    snap = state.snapshot()
+    result = snap['result']
+    freq = result['frequency']
+    expected = snap['expected']
+    status = result['status']
+    valid = freq is not None and status in ('LIVE', 'MEASURING')
+    difference = abs(freq-expected) if valid and expected is not None else None
+    if difference is None:
+        comparison = 'NOT VERIFIED'
+    elif difference <= args.tolerance_hz:
+        comparison = 'MATCH'
+    elif abs(freq-2*expected) <= args.tolerance_hz:
+        comparison = 'POSSIBLE 2ND HARMONIC'
+    else:
+        comparison = 'DIFFERENT'
+    return {
+        'server_time': time.time(),
+        'mode': 'SYNTHETIC SIMULATION' if args.simulate else 'PCAP REPLAY' if args.pcap else 'LIVE NEXMON CSI',
+        'source': args.iface or str(args.pcap) if not args.simulate else 'synthetic',
+        'status': status, 'comparison': comparison,
+        'frequency_hz': freq, 'rate_equivalent_cpm': freq*60 if freq is not None else None,
+        'expected_hz': expected, 'error_hz': difference,
+        'tolerance_hz': args.tolerance_hz,
+        'peak_to_median': result['ratio'],
+        'peak_to_median_db': 10*math.log10(result['ratio']) if result['ratio'] > 0 else None,
+        'supported_subcarriers': result['supported'],
+        'usable_subcarriers': result['n_carriers'],
+        'best_subcarrier': result['strongest_sc'],
+        'bandwidth_mhz': args.bw, 'chip': args.chip,
+        'udp_port': args.udp_port, 'core_stream': snap['core_stream'],
+        'packets_decoded': snap['decoded'], 'packets_seen': snap['seen'],
+        'decode_errors': snap['errors'], 'packets_ignored': snap['ignored'],
+        'packet_rate': snap['rate'], 'timestamp_fs': result['sampling_rate'],
+        'coverage_pct': result['coverage']*100,
+        'max_gap_ms': result['gap']*1000,
+        'window_seconds': args.window, 'window_filled_seconds': result['duration'],
+        'resolution_hz': result['resolution'],
+        'processing_ms': result['processing_ms'],
+        'update_seconds': args.update_seconds,
+        'result_timestamp': result['updated'],
+        'waveform': result['waveform'],
+        'spectrum_hz': result['spectrum_f'],
+        'spectrum_power': result['spectrum'],
+        'top_peaks_hz': result['peaks'],
+        'frequency_history_hz': snap['frequency_history'],
+        'recording': state.recorder.active,
+        'recorded_frames': state.recorder.rows,
+        'error_message': snap['err'],
+        'finished': snap['finished'],
+        'notes': 'Cycles/min is a mathematical equivalent, not a validated human heart-rate reading.'
+    }
+
+
+def start_web_dashboard(state, args):
+    """Start a read-only HTTP server sharing the same State as curses UI."""
+    html_path = Path(__file__).resolve().with_name('servo_dashboard.html')
+    if not html_path.is_file():
+        raise FileNotFoundError(f'Place servo_dashboard.html next to {Path(__file__).name}')
+    html_bytes = html_path.read_bytes()
+
+    class DashboardHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            from urllib.parse import urlsplit
+            path = urlsplit(self.path).path
+            if path in ('/', '/index.html'):
+                body = html_bytes
+                content_type = 'text/html; charset=utf-8'
+                code = 200
+            elif path == '/api/status':
+                try:
+                    body = json.dumps(web_payload(state, args), allow_nan=False,
+                                      separators=(',', ':')).encode('utf-8')
+                    code = 200
+                except Exception as exc:
+                    LOGGER.exception('web API serialization error')
+                    body = json.dumps({'error': str(exc)}).encode('utf-8')
+                    code = 500
+                content_type = 'application/json; charset=utf-8'
+            elif path == '/health':
+                body = b'ok'
+                content_type = 'text/plain; charset=utf-8'
+                code = 200
+            else:
+                body = b'Not found'
+                content_type = 'text/plain; charset=utf-8'
+                code = 404
+            try:
+                self.send_response(code)
+                self.send_header('Content-Type', content_type)
+                self.send_header('Content-Length', str(len(body)))
+                self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate')
+                self.send_header('X-Content-Type-Options', 'nosniff')
+                self.send_header('Content-Security-Policy',
+                                 "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+                                 "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+                                 "connect-src 'self'; object-src 'none'; frame-ancestors 'none'")
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def log_message(self, fmt, *values):
+            # Avoid mixing HTTP request logs into the curses dashboard.
+            LOGGER.debug('web %s', fmt % values)
+
+    # Bind only to the requested interface. By default available on the LAN.
+    class Server(ThreadingHTTPServer):
+        daemon_threads = True
+        allow_reuse_address = True
+
+    server = Server((args.web_host, args.web_port), DashboardHandler)
+    thread = threading.Thread(target=server.serve_forever,
+                              name='servo-web-dashboard', daemon=True)
+    thread.start()
+    return server, thread
 
 
 def analyze_csi(timestamps, csi, args):
@@ -419,36 +577,70 @@ def frequency_worker(state, args, stop):
 
 
 def sniff_live(state, args, stop):
+    """Receive Nexmon CSI; software-filter UDP/5500 by default.
+
+    Packet arrival -> UDP -> dest port -> Nexmon src IP -> decode -> core/stream
+    are intentionally independent counters. In particular, `seen` always
+    counts packets reaching Scapy (not only successfully decoded CSI).
+    """
     try:
         from scapy.all import AsyncSniffer, UDP, IP
     except ImportError:
         with state.lock:
-            state.last_error = "scapy missing; install with pip install scapy"
+            state.last_error = "Scapy missing; install with: python -m pip install scapy"
         stop.set()
         return
 
     def handle(pkt):
         with state.lock:
             state.total_seen += 1
-        if UDP not in pkt or pkt[UDP].dport != args.udp_port:
+            sequence_index = state.total_seen
+            if not state.last_non_udp and UDP not in pkt:
+                state.last_non_udp = str(pkt.summary())[:120]
+
+        if UDP not in pkt:
             return
+        udp = pkt[UDP]
+        with state.lock:
+            state.udp_seen += 1
+            if IP in pkt:
+                state.last_udp = (f"{pkt[IP].src}:{udp.sport} -> "
+                                  f"{pkt[IP].dst}:{udp.dport}")
+            else:
+                state.last_udp = f"non-IPv4 UDP dport={udp.dport}"
+
+        if udp.dport != args.udp_port:
+            return
+        with state.lock:
+            state.port_seen += 1
+
         if args.src_ip and (IP not in pkt or pkt[IP].src != args.src_ip):
             return
-        payload = bytes(pkt[UDP].payload)
+        payload = bytes(udp.payload)
+        with state.lock:
+            state.source_seen += 1
+            state.last_payload_bytes = len(payload)
+
         try:
-            frame = decode_frame_payload(payload, index=state.total_seen,
-                                         ts=time.time(), chip=args.chip,
-                                         bw=args.bw, nfft_override=args.nfft,
-                                         header_format=args.header_format)
-        except DecodeError:
+            frame = decode_frame_payload(
+                payload, index=sequence_index, ts=time.time(),
+                chip=args.chip, bw=args.bw, nfft_override=args.nfft,
+                header_format=args.header_format,
+            )
+        except DecodeError as exc:
             with state.lock:
                 state.errors += 1
+                state.last_decode_error = str(exc)[:160]
             return
         state.handle_frame(frame, args)
 
     sniff = None
     try:
-        sniff = AsyncSniffer(iface=args.iface, filter=f"udp port {args.udp_port}",
+        # DO NOT enable the Scapy BPF filter by default. The user's Pi 5
+        # Nexmon export produces valid UDP/5500 that this filter did not pass.
+        # Software filtering above is sufficient at ~100 CSI frames/sec.
+        capture_filter = f"udp port {args.udp_port}" if args.bpf_filter else None
+        sniff = AsyncSniffer(iface=args.iface, filter=capture_filter,
                              prn=handle, store=False)
         sniff.start()
         while not stop.wait(0.25):
@@ -457,7 +649,7 @@ def sniff_live(state, args, stop):
     except Exception as exc:
         LOGGER.exception("sniffing failure")
         with state.lock:
-            state.last_error = f"Sniffer: {exc} (try administrator/sudo and Npcap)"
+            state.last_error = f"Sniffer: {exc} (check interface and sudo/Npcap)"
         stop.set()
     finally:
         if sniff is not None and sniff.running:
@@ -620,11 +812,20 @@ def display(stdscr, state, args, stop):
         sc = snap['core_stream']
         safe_put(stdscr, 3, f"Input: {args.iface or args.pcap or 'SYNTHETIC'} | core/stream {sc or 'auto'} | chip {args.chip} | bandwidth {args.bw} MHz | UDP {args.udp_port}")
         safe_put(stdscr, 4, f"Recorder: {'ON ' + str(state.recorder.rows) + ' frames' if state.recorder.active else 'OFF'} | [C] capture CSI+frequency CSV | [Q] quit")
+        mode = 'BPF udp filter' if args.bpf_filter else 'software UDP filter (Nexmon-compatible)'
+        safe_put(stdscr, 5, f"Capture: {mode} | raw {snap['seen']:,} | UDP {snap['udp_seen']:,} | port {args.udp_port} {snap['port_seen']:,} | source OK {snap['source_seen']:,}")
         safe_put(stdscr, 6, 'MEASURED DOMINANT CSI FREQUENCY', curses.A_BOLD)
         safe_put(stdscr, 7, f"     {f:6.3f} Hz   ({f*60:6.1f} cycles/min)" if f is not None else '       ---.--- Hz   (waiting for sufficient CSI)')
         safe_put(stdscr, 8, f"Expected servo frequency: {exp:.2f} Hz" if exp is not None else 'Expected servo frequency: not set')
         safe_put(stdscr, 9, f"Comparison: {comparison}" + (f" | absolute error {error:.3f} Hz" if error is not None else '') + '    [+/-] adjust, [0] clear')
         status = result['status']
+        if args.debug_capture or (snap['decoded'] == 0 and time.time() - state.start_wall >= 3):
+            diagnostic = (f"last UDP: {snap['last_udp']} | payload {snap['last_payload_bytes']} bytes"
+                          if snap['last_udp'] else
+                          f"no UDP captured; sample other packet: {snap['last_non_udp'] or 'none'}")
+            if snap['last_decode_error']:
+                diagnostic += f" | decode: {snap['last_decode_error']}"
+            safe_put(stdscr, 10, diagnostic)
         safe_put(stdscr, 11, f"Signal status: {status} | spectral peak/median {result['ratio']:.1f}x | supporting SCs {result['supported']}/{result['n_carriers']}")
         safe_put(stdscr, 12, f"Window {result['duration']:.1f}/{args.window:.0f}s | resolution ~{result['resolution']:.3f} Hz | timing fs {result['sampling_rate']:.1f} Hz | coverage {result['coverage']*100:.0f}% | largest gap {result['gap']:.3f}s")
         safe_put(stdscr, 13, f"Waveform uses subcarrier {result['strongest_sc']} | update {args.update_seconds:.1f}s | computation {result['processing_ms']:.0f} ms")
@@ -640,6 +841,8 @@ def display(stdscr, state, args, stop):
                      sparkline(past, width=min(35, max(10, stdscr.getmaxyx()[1]-56))))
         safe_put(stdscr, 22, "DEMO CHECK: servo OFF -> ON -> change servo period -> OFF; verify frequency changes and disappears.")
         safe_put(stdscr, 23, "Note: strong peaks can be harmonics, Wi-Fi/network periodicity or ambient motion.")
+        if not args.no_web:
+            safe_put(stdscr, 24, f'WEB DASHBOARD: http://{args.web_display_ip}:{args.web_port}  (Windows browser, same LAN)')
         if snap['err']:
             safe_put(stdscr, 25, f"ERROR: {snap['err']}")
         if snap['finished']:
@@ -651,6 +854,7 @@ def display(stdscr, state, args, stop):
 def console_display(state, args, stop):
     """CI/headless testing, no terminal needed. Also usable on Windows terminals."""
     last_update = None
+    last_diag_time = 0.0
     while not stop.wait(0.25):
         snap = state.snapshot()
         res = snap['result']
@@ -662,6 +866,18 @@ def console_display(state, args, stop):
                   f"support={res['supported']}/{res['n_carriers']} "
                   f"packets={snap['decoded']}", flush=True)
             last_update = res['updated']
+        # Show packet progression if requested, or automatically on capture failure.
+        if ((args.debug_capture or
+             (snap['decoded'] == 0 and time.time() - state.start_wall >= 3))
+                and time.monotonic() - last_diag_time >= 2.0):
+            print(f"  CAPTURE raw={snap['seen']} UDP={snap['udp_seen']} "
+                  f"port{args.udp_port}={snap['port_seen']} "
+                  f"sourceOK={snap['source_seen']} decoded={snap['decoded']} "
+                  f"errors={snap['errors']} ignored={snap['ignored']}", flush=True)
+            print(f"          last_udp={snap['last_udp'] or '-'} "
+                  f"payload_bytes={snap['last_payload_bytes']} "
+                  f"decode_error={snap['last_decode_error'] or '-'}", flush=True)
+            last_diag_time = time.monotonic()
         if snap['err']:
             print('ERROR:', snap['err'], flush=True)
             stop.set()
@@ -724,6 +940,13 @@ def main(argv=None):
     p.add_argument('--playback-speed', type=float, default=1.0, help='PCAP playback factor; 1.0 is realtime')
     p.add_argument('--simulate-hz', type=float, default=1.2, help='Injected synthetic frequency, not measured hardware')
     p.add_argument('--no-ui', action='store_true', help='Simple headless text output instead of curses')
+    p.add_argument('--no-web', action='store_true', help='Disable browser dashboard (enabled by default)')
+    p.add_argument('--web-host', default='0.0.0.0', help='Web server bind address; 0.0.0.0 allows LAN access')
+    p.add_argument('--web-port', type=int, default=8080, help='Web dashboard TCP port')
+    p.add_argument('--debug-capture', action='store_true',
+                   help='Show staged packet counters/last UDP and decoding errors')
+    p.add_argument('--bpf-filter', action='store_true',
+                   help='Opt IN to kernel UDP BPF capture filter (may drop Nexmon packets on Pi)')
     p.add_argument('--duration', type=float, help='Optional runtime cap in seconds (useful for --no-ui testing)')
     args = p.parse_args(argv)
     if (args.select_core is None) != (args.select_stream is None):
@@ -736,6 +959,8 @@ def main(argv=None):
         p.error('Update/refresh/playback rates must be positive')
     if args.min_coverage <= 0 or args.min_coverage > 1:
         p.error('--min-coverage must be in (0,1]')
+    if not 1 <= args.web_port <= 65535:
+        p.error('--web-port must be in 1..65535')
     if args.expected_hz is not None and args.expected_hz <= 0:
         p.error('--expected-hz must be positive')
     if args.pcap and not args.pcap.exists():
@@ -750,6 +975,19 @@ def main(argv=None):
     state = State(args.window, recorder)
     state.expected = args.expected_hz
     stop = threading.Event()
+    web_server = None
+    web_thread = None
+    args.web_display_ip = (lan_ip_hint() if args.web_host in ('0.0.0.0', '::')
+                           else args.web_host)
+    if not args.no_web:
+        try:
+            web_server, web_thread = start_web_dashboard(state, args)
+            print(f'WiPulse web dashboard: http://{args.web_display_ip}:{args.web_port}', flush=True)
+            if args.web_display_ip == 'PI_IP_ADDRESS':
+                print('Tip: run hostname -I on the Pi to find its LAN IP address.', flush=True)
+        except (OSError, FileNotFoundError) as exc:
+            args.no_web = True
+            print(f'Web dashboard unavailable: {exc}', flush=True)
     if args.record_on_start:
         recorder.start()
     worker = threading.Thread(target=frequency_worker, args=(state, args, stop), daemon=True)
@@ -771,6 +1009,11 @@ def main(argv=None):
         pass
     finally:
         stop.set()
+        if web_server is not None:
+            web_server.shutdown()
+            web_server.server_close()
+            if web_thread is not None:
+                web_thread.join(timeout=2)
         receive.join(timeout=3)
         worker.join(timeout=3)
         recorder.stop()
