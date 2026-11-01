@@ -11,11 +11,11 @@ tmux new-session -d -s "$SESSION"
 # Split into top/bottom panes
 tmux split-window -v -t "$SESSION"
 
-COMMON_SETUP='cd ~/work && source env/bin/activate && cd WiPulse/echo'
+COMMON_SETUP='cd ~/work && source env/bin/activate && cd WiPulse/falcon'
 
 # Top pane (0)
 tmux send-keys -t "$SESSION:0.0" "$COMMON_SETUP" C-m
-tmux send-keys -t "$SESSION:0.0" "sudo python live_monitor.py --iface wlan0 --chip 43455c0 --bw 80 --capture-mode complex" C-m
+tmux send-keys -t "$SESSION:0.0" "sudo python live_monitor.py --iface wlan0 --chip 43455c0 --bw 20 --capture-mode complex" C-m
 
 # Wait for startup
 sleep 3
@@ -34,7 +34,7 @@ sleep 3
 tmux send-keys -t "$SESSION:0.1" "c"
 
 # Focus bottom pane
-tmux select-pane -t "$SESSION:0.1"
+tmux select-pane -t "$SESSION:0.0"
 
 # Attach
 tmux attach-session -t "$SESSION"
