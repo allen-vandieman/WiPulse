@@ -3,7 +3,17 @@
 WiPulse - Contactless Vital Sign Extraction
 
 1. [Setup](/setup/README.md)
-1. [Extraction App](/app/README.md)
+1. [Extraction App](/echo/README.md)
+
+- Current Problems
+
+1. [Current Problems](/plans/current_problems.md)
+
+- Old Plans
+
+1. [HR Pipeline plan](/plans/old/plan.md)
+1. [another Pipeline plan](/plans/old/another_plan.md)
+1. [rough Pipeline plan](/plans/old/rough.md)
 
 ## Contents
 
@@ -45,6 +55,8 @@ consumer hardware, offering a less intrusive alternative for monitoring
 vulnerable individuals. 
 
 ## Goals
+
+![Goals](/img/goals.png)
 
 1. Use consumer of the shevle IOT devices
 2. Patch firmware to allow (a) transmission and (b) capture  of raw frames on (c) any channel
@@ -184,4 +196,75 @@ The Nyquist Rate: This is the minimum sampling speed required to avoid distortio
 
 The Nyquist Frequency (or Folding Frequency): This is exactly half of the sampling rate. Any frequency present in the original signal that is higher than the Nyquist frequency will "fold" over and cause distortion in the digital version. This phenomenon is known as aliasing.
 
-![Nyquist](img/Nyquist.PNG)
+![Nyquist](img/processing/Nyquist.PNG)
+
+#### Hampel filter
+
+Removes outliers
+
+Statistical method used to detect and remove outliers in time series data or signals. It uses a moving sliding window, calculates the local median and *Median Absolute Deviation* (MAD), and replaces points that fall outside a set threshold with the median.
+
+`How the Window Works`
+
+- Center Point: The code looks at the current data point in the middle of the window.
+
+- Neighbors: It grabs k points before and k points after the center point.
+
+- Total Size: The window length equals 2k + 1 total samples.
+
+- Sliding Action: The window moves one step forward along the dataset until it checks every point.
+
+#### Notch filter
+
+A notch filter is a type of **band-stop filter** with a very narrow stopband and *high* **Q factor**. 
+
+It blocks or heavily attenuates a single specific frequency or a tiny range of frequencies, while letting all other frequencies pass through completely unchanged.
+
+![band stop](img/processing/Band-Reject_Filter.svg.jpg)
+
+Bandstop filter is a lowpass + highpass
+
+low  pass -> RC
+high pass -> CR
+
+notch filter ->	apply hampel filter
+
+Q (quality factor)
+BW (bandwidth)
+f (Operating frequency)
+
+BW = f / Q
+
+Higher Q → narrower notch
+Lower Q → wider notch
+
+####  Butterworth bandpass filter
+
+third-order -> amount of poles (capacitors)
+
+![Savitzky-Golay](img/processing/Butterworth-filters-ideal-response-6_Q320.jpg)
+
+#### Savitzky-Golay filtering
+
+a digital smoothing and filtering method that fits a low-degree polynomial to a sliding window of data points using linear least squares. It removes high-frequency noise from a signal while better preserving peak heights, widths, and high-frequency details compared to standard moving average filters.
+
+![Savitzky-Golay](img/processing/Savitzky-Golay.jpg)
+
+### Test processing pipeline
+
+After successfully setting up a processing pipeline, an next step is to test the pipeline with a synthetically generated CSI data, where i know what is expected and see what the pipeline produce.
+
+Ideally our goals should be:
+
+![Output graph](img/processing/diagnose_psd-72-lossy.png)
+
+THe image above is an example output where we can see the detected heart rate and ground truth data are within a 3 BPM error. We can also see a clear bump near the HR and a very good SNR.
+
+### Harmonics
+
+Harmonics are any frequencies that are integer (whole-number) multiples of a base fundamental frequency.
+
+**Harmonic Distortion and Noise**
+
+When a perfect sine wave signal passes through an imperfect or "non-linear" system (like an overdriven amplifier or a saturated transformer), the output signal gets squashed or distorted. This distortion creates unwanted new frequencies at harmonic intervals.
+

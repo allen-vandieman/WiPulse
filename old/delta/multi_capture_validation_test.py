@@ -1,0 +1,138 @@
+import argparse
+from pathlib import Path
+import numpy as np
+import pandas as pd
+
+
+def compute_capture_metrics(window_df: pd.DataFrame, min_windows_for_corr: int = 4) -> dict:
+    """
+    Computes summary metrics for a single capture's window DataFrame.
+    Filters out N < min_windows_for_corr calculation artifacts for Pearson correlation.
+    """
+    if window_df.empty:
+        return {
+            "n_windows": 0,
+            "mae": np.nan,
+            "median_ae": np.nan,
+            "rmse": np.nan,
+            "correlation": np.nan,
+        }
+
+    # Support pre-computed abs_error if available
+    if "abs_error" in window_df.columns:
+        errors = window_df["abs_error"]
+    else:
+        errors = np.abs(window_df["csi_bpm"] - window_df["gt_bpm"])
+
+    mae = float(np.mean(errors))
+    median_ae = float(np.median(errors))
+    rmse = float(np.sqrt(np.mean((window_df["csi_bpm"] - window_df["gt_bpm"]) ** 2)))
+
+    # Filter out small-sample calculation artifacts (N < min_windows_for_corr)
+    correlation = np.nan
+    if len(window_df) >= min_windows_for_corr:
+        std_csi = window_df["csi_bpm"].std()
+        std_gt = window_df["gt_bpm"].std()
+        if std_csi > 1e-5 and std_gt > 1e-5:
+            correlation = float(window_df["csi_bpm"].corr(window_df["gt_bpm"]))
+
+    return {
+        "n_windows": len(window_df),
+        "mae": mae,
+        "median_ae": median_ae,
+        "rmse": rmse,
+        "correlation": correlation,
+    }
+
+
+def evaluate_multi_captures(results_csv_path: str, min_windows_for_corr: int = 4) -> None:
+    path = Path(results_csv_path)
+    if not path.exists():
+        print(f"Error: File {results_csv_path} not found.")
+        return
+
+    df = pd.read_csv(path)
+
+    # Normalize column name for capture (handles 'capture' or 'capture_name')
+    if "capture" in df.columns and "capture_name" not in df.columns:
+        df = df.rename(columns={"capture": "capture_name"})
+
+    # Required columns check
+    required_cols = {"capture_name", "method", "csi_bpm", "gt_bpm"}
+    if not required_cols.issubset(df.columns):
+        print(f"Error: CSV missing required columns. Found: {list(df.columns)}")
+        return
+
+    print("=" * 75)
+    print(" MULTI-CAPTURE VALIDATION REPORT")
+    print("=" * 75)
+
+    # 1. Individual Capture Metrics Breakdown
+    capture_summaries = []
+    
+    grouped = df.groupby(["capture_name", "method"])
+    for (capture, method), group in grouped:
+        metrics = compute_capture_metrics(group, min_windows_for_corr=min_windows_for_corr)
+        metrics["capture_name"] = capture
+        metrics["method"] = method
+        capture_summaries.append(metrics)
+
+    summary_df = pd.DataFrame(capture_summaries)
+
+    # Prepare printable DataFrame (Format NaNs visually)
+    printable_df = summary_df.copy()
+    printable_df["correlation"] = printable_df["correlation"].apply(
+        lambda x: f"{x:10.6f}" if pd.notna(x) else f"N/A (N<{min_windows_for_corr})"
+    )
+
+    print("\n[1] Per-Capture Evaluation Results:")
+    print("-" * 75)
+    display_cols = ["capture_name", "method", "n_windows", "mae", "median_ae", "rmse", "correlation"]
+    print(printable_df[display_cols].to_string(index=False))
+
+    # 2. Method Performance Aggregations
+    print("\n" + "=" * 75)
+    print("[2] Overall Method Performance Aggregations:")
+    print("-" * 75)
+
+    for method, method_group in summary_df.groupby("method"):
+        print(f"\n--- Method: {method} ---")
+        print(f"Total Evaluated Captures : {len(method_group)}")
+        print(f"Total Evaluated Windows  : {method_group['n_windows'].sum()}")
+        print(f"Mean MAE                 : {method_group['mae'].mean():.2f} BPM")
+        print(f"Median MAE               : {method_group['median_ae'].median():.2f} BPM")
+        print(f"Mean RMSE                : {method_group['rmse'].mean():.2f} BPM")
+        
+        # Valid per-capture correlation mean (excluding NaNs from small sample sizes)
+        valid_corrs = method_group["correlation"].dropna()
+        if not valid_corrs.empty:
+            print(f"Mean Per-Capture Corr    : {valid_corrs.mean():.4f} (from {len(valid_corrs)} captures with N >= {min_windows_for_corr})")
+        else:
+            print(f"Mean Per-Capture Corr    : N/A (No captures had >= {min_windows_for_corr} windows)")
+
+        # Global Scatter Correlation (All pooled windows across captures)
+        raw_method_df = df[df["method"] == method].dropna(subset=["csi_bpm", "gt_bpm"])
+        if len(raw_method_df) >= 4:
+            global_corr = raw_method_df["csi_bpm"].corr(raw_method_df["gt_bpm"])
+            print(f"Global Pooled Window Corr: {global_corr:.4f} (across {len(raw_method_df)} total windows)")
+
+    print("=" * 75)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Multi-Capture CSI Heart Rate Validation Evaluator")
+    parser.add_argument(
+        "--results_csv",
+        type=str,
+        default="multi_capture_window_results.csv",
+        help="Path to the window results CSV generated by the pipeline",
+    )
+    parser.add_argument(
+        "--min_windows",
+        type=int,
+        default=4,
+        help="Minimum windows per capture needed to calculate Pearson correlation (default: 4)",
+    )
+    args = parser.parse_args()
+
+    evaluate_multi_captures(args.results_csv, min_windows_for_corr=args.min_windows)

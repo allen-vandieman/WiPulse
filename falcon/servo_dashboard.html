@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#08111c">
+  <title>WiPulse · Servo CSI Live Monitor</title>
+  <style>
+    :root{color-scheme:dark;--bg:#070f19;--panel:#0e1b29;--panel2:#112233;--outline:#253849;--muted:#8fa4b6;--ink:#e9f3f9;--cyan:#59e2d0;--amber:#f5bb64;--rose:#ff7786;--blue:#83aafd}
+    *{box-sizing:border-box}
+    html,body{padding:0;margin:0;min-height:100%;background:var(--bg);color:var(--ink);font-family:Inter,'Segoe UI',Arial,sans-serif}
+    body{background-image:radial-gradient(ellipse at 50% -18%,#17394b88,transparent 52%),linear-gradient(125deg,#091521,#07101a 80%)}
+    .shell{max-width:1480px;padding:28px 34px 48px;margin:0 auto}
+    .masthead{display:flex;justify-content:space-between;align-items:center;gap:15px;margin-bottom:30px;flex-wrap:wrap}
+    .brand{display:flex;align-items:center;gap:13px}
+    .logo{width:45px;height:45px;display:grid;place-items:center;border-radius:13px;background:linear-gradient(135deg,#18364a,#112d39);border:1px solid #275e63;box-shadow:inset 0 0 25px #4df5d010}
+    .logo svg{width:27px;height:27px}
+    .brandname{font-size:23px;letter-spacing:-.7px;font-weight:800}
+    .brandname span{color:var(--cyan)}
+    .brandcaption{font-size:11px;color:var(--muted);letter-spacing:1.8px;text-transform:uppercase;margin-top:3px}
+    .session{display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+    .session small{color:var(--muted);letter-spacing:.7px;font-size:12px}
+    .statusdot{display:inline-block;width:8px;height:8px;background:var(--muted);border-radius:50%;margin-right:8px;box-shadow:0 0 0 3px #879eaf16}
+    .statusdot.online{background:var(--cyan);box-shadow:0 0 15px #59e2d080}
+    .statusdot.bad{background:var(--rose)}
+    .badge{border:1px solid var(--outline);background:#152635;padding:9px 12px;border-radius:20px;font-weight:700;font-size:11px;letter-spacing:1.2px;text-transform:uppercase}
+    .badge[data-mode="SYNTHETIC SIMULATION"]{border-color:#b78838;color:var(--amber)}
+    .badge[data-mode="PCAP REPLAY"]{border-color:#6488b7;color:var(--blue)}
+    .panel{border:1px solid var(--outline);background:linear-gradient(145deg,#10202f,#0a1623 95%);border-radius:19px;box-shadow:0 18px 44px #00000022}
+    .primary-grid{display:grid;grid-template-columns:minmax(0,1.8fr) minmax(310px,.9fr);gap:18px;align-items:stretch}
+    .hero{position:relative;overflow:hidden;min-height:435px;padding:30px 30px 25px;display:flex;align-items:center;flex-direction:column;justify-content:center;text-align:center}
+    .hero::before{content:'';position:absolute;border-radius:50%;width:570px;height:570px;top:-305px;left:50%;transform:translateX(-50%);background:radial-gradient(circle,#54d4c51a 0%,transparent 66%);pointer-events:none}
+    .eyebrow{font-size:12px;font-weight:700;letter-spacing:2.7px;text-transform:uppercase;color:var(--muted)}
+    .reading{margin:16px 0 2px;font-variant-numeric:tabular-nums;white-space:nowrap;letter-spacing:-7px;font-size:clamp(92px,11vw,165px);font-weight:780;line-height:1.08;color:#e8fcfb;text-shadow:0 0 58px #50e5ce1a}
+    .reading .unit{letter-spacing:-1px;font-size:clamp(24px,3.6vw,49px);font-weight:450;color:var(--cyan);margin-left:12px}
+    .reading.is-empty{color:#677d8b;letter-spacing:0}
+    .hero .indicator{margin:7px 0 13px;border:1px solid #2a5d60;color:#7ce8d6;background:#15333a;padding:7px 16px;border-radius:25px;font-size:11px;font-weight:750;letter-spacing:1.6px}
+    .hero .indicator.warn{border-color:#705634;color:#f8c47c;background:#342717}
+    .hero .indicator.bad{border-color:#713842;color:#ff8792;background:#311c29}
+    .equivalent{margin:17px 0 3px;font-size:clamp(20px,2.8vw,29px);font-weight:650;letter-spacing:-.6px}
+    .equivalent span{color:var(--cyan);font-variant-numeric:tabular-nums}
+    .hint{font-size:12px;line-height:1.5;color:var(--muted);margin:3px 0 0}
+    .compare{display:flex;align-items:center;justify-content:center;gap:16px;margin-top:25px;flex-wrap:wrap;font-size:13px}
+    .compare .metric{color:#b4c4d0}.compare .metric strong{color:var(--ink);font-variant-numeric:tabular-nums}
+    .compare .outcome{font-size:11px;font-weight:800;letter-spacing:1px;color:var(--amber);border:1px solid #56472e;padding:6px 10px;border-radius:8px}
+    .compare .outcome.good{color:var(--cyan);border-color:#29645d}
+    .stack{display:grid;gap:18px;grid-template-rows:1fr 1fr}
+    .sidecard{padding:23px 25px;min-width:0}
+    .cardheading{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:20px}
+    .cardheading h2{font-size:14px;letter-spacing:.4px;font-weight:750;margin:0}
+    .meta{font-size:11px;color:var(--muted)}
+    .bar{height:7px;border-radius:8px;background:#1d3343;overflow:hidden;margin:14px 0 4px}
+    .bar i{height:100%;background:linear-gradient(90deg,#247c88,#6df2d4);display:block;width:0%;border-radius:8px;transition:width .65s ease}
+    .numbers{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
+    .numbers .value{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-1.1px}
+    .numbers .lbl{font-size:11px;color:var(--muted);margin-top:5px}
+    .bigsmall{font-size:20px;color:var(--cyan)}
+    .details{display:grid;grid-template-columns:1fr 1fr;gap:12px 15px;align-items:start}
+    .details dt{font-size:12px;color:var(--muted);margin-bottom:4px}
+    .details dd{font-size:18px;font-weight:650;font-variant-numeric:tabular-nums;margin:0}
+    .triple{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px;margin-top:18px}
+    .chartcard{padding:22px 22px 17px;min-width:0}
+    canvas{width:100%;height:183px;display:block}
+    .chartnote{color:var(--muted);font-size:11px;line-height:1.4;margin-top:9px;min-height:30px}
+    .foot{display:flex;align-items:center;justify-content:space-between;gap:14px;color:var(--muted);font-size:11px;margin-top:20px;flex-wrap:wrap;line-height:1.6}
+    .foot strong{color:#b9cdd9}
+    .warnline{border-left:3px solid #ad945d;padding-left:11px;color:#aebdca}
+    .recording{color:var(--cyan);font-weight:700}
+    .terminal{color:var(--cyan)}
+    .sr-only{position:absolute;left:-10000px;width:1px;height:1px;overflow:hidden}
+    @media(max-width:1050px){.primary-grid{grid-template-columns:1fr}.stack{grid-template-columns:1fr 1fr;grid-template-rows:1fr}.triple{grid-template-columns:1fr 1fr}.triple .chartcard:last-child{grid-column:1/-1}.reading{font-size:clamp(90px,16vw,146px)}}
+    @media(max-width:650px){.shell{padding:19px 14px 34px}.hero{min-height:385px;padding:24px 12px}.reading{font-size:clamp(75px,16vw,108px);letter-spacing:-5px}.stack,.triple{grid-template-columns:1fr}.triple .chartcard:last-child{grid-column:auto}.session{gap:8px}.brandname{font-size:19px}.sidecard{padding:20px}.primary-grid{gap:12px}.stack,.triple{gap:12px}.compare{gap:8px}}
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="masthead">
+      <div class="brand">
+        <div class="logo" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none"><path d="M2 18h6l3-9 5 17 4-12 3 4h7" stroke="#67e8d5" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div><div class="brandname">Wi<span>Pulse</span> <span style="color:#e1edf3;font-weight:450">/ CSI-Heart</span></div><div class="brandcaption">Contactless movement sensing · Live monitor</div></div>
+      </div>
+      <div class="session">
+        <span class="badge" id="mode" data-mode="LIVE NEXMON CSI">LIVE NEXMON CSI</span>
+        <small><span id="dot" class="statusdot"></span><span id="connection">Connecting to Raspberry Pi…</span></small>
+      </div>
+    </header>
+
+    <section class="primary-grid" aria-label="Main frequency and signal quality">
+      <article class="panel hero">
+        <div class="eyebrow">Measured dominant CSI frequency</div>
+        <div class="reading is-empty" id="frequency" aria-live="polite">—<span class="unit">Hz</span></div>
+        <div class="indicator warn" id="signalstatus">WAITING FOR CSI</div>
+        <div class="equivalent"><span id="equivalent">—</span> <span style="font-size:16px;color:#c5d4df;font-weight:450">cycles/min</span></div>
+        <p class="hint">Heart-rate equivalent from frequency × 60 · <strong>not a measured human heart rate</strong></p>
+        <div class="compare"><div class="metric">Expected servo: <strong id="expected">— Hz</strong></div><div class="metric">Error: <strong id="errorhz">— Hz</strong></div><span class="outcome" id="comparison">NOT VERIFIED</span></div>
+      </article>
+
+      <aside class="stack" aria-label="Quality and receiver details">
+        <article class="panel sidecard">
+          <div class="cardheading"><h2>Detection quality</h2><span class="meta">CSI spectral analysis</span></div>
+          <div class="numbers">
+            <div><div class="value" id="pmr">— <span class="bigsmall">×</span></div><div class="lbl">Peak / median spectral power</div></div>
+            <div><div class="value" id="pmrdb">— <span class="bigsmall">dB</span></div><div class="lbl">Equivalent peak / median in dB</div></div>
+            <div><div class="value" id="support">— / —</div><div class="lbl">Supporting subcarriers</div></div>
+            <div><div class="value" id="supportpct">—%</div><div class="lbl">Subcarrier agreement</div></div>
+          </div>
+          <div class="bar" aria-label="Supporting subcarrier fraction"><i id="supportbar"></i></div>
+        </article>
+        <article class="panel sidecard">
+          <div class="cardheading"><h2>Receiver & capture</h2><span id="recording" class="meta">Recorder OFF</span></div>
+          <dl class="details">
+            <div><dt>Packet rate</dt><dd id="rate">— pkt/s</dd></div>
+            <div><dt>Wi-Fi bandwidth</dt><dd id="bw">— MHz</dd></div>
+            <div><dt>Packets decoded</dt><dd id="packets">—</dd></div>
+            <div><dt>Decode errors</dt><dd id="errors">—</dd></div>
+            <div><dt>Window coverage</dt><dd id="coverage">—%</dd></div>
+            <div><dt>Window filled</dt><dd id="window">— s</dd></div>
+          </dl>
+        </article>
+      </aside>
+    </section>
+
+    <section class="triple" aria-label="Live charts">
+      <article class="panel chartcard">
+        <div class="cardheading"><h2>CSI amplitude waveform</h2><span class="meta" id="sc">Subcarrier —</span></div>
+        <canvas id="wavechart" role="img" aria-label="Normalized CSI amplitude waveform"></canvas>
+        <div class="chartnote">Band-pass filtered · last ~8 seconds · relative amplitude</div>
+      </article>
+      <article class="panel chartcard">
+        <div class="cardheading"><h2>Frequency spectrum</h2><span class="meta">Relative spectral power</span></div>
+        <canvas id="spectrumchart" role="img" aria-label="CSI frequency spectrum"></canvas>
+        <div class="chartnote" id="peaks">Top peaks: waiting for enough CSI data</div>
+      </article>
+      <article class="panel chartcard">
+        <div class="cardheading"><h2>Frequency trend</h2><span class="meta">Recent estimates</span></div>
+        <canvas id="trendchart" role="img" aria-label="Detected frequency over time"></canvas>
+        <div class="chartnote">Rolling-window result · updates about every second</div>
+      </article>
+    </section>
+
+    <footer class="foot">
+      <div class="warnline">CSI oscillations may arise from servo motion, harmonics or environmental interference. Validate with a stationary baseline and independent servo timing.</div>
+      <div><strong id="detail">No measurements yet</strong> · <span id="age">—</span></div>
+    </footer>
+  </main>
+  <script>
+  (()=>{
+    'use strict';
+    const $=id=>document.getElementById(id);
+    let latest=null,lastGoodAt=0,requestInProgress=false;
+    const num=(v,d=1)=>typeof v==='number'&&Number.isFinite(v)?v.toFixed(d):'—';
+    const count=v=>Number.isFinite(v)?Math.round(v).toLocaleString():'—';
+    const safe=(v,fallback='—')=>v==null||v===''?fallback:String(v);
+    const clamp=(v,lo,hi)=>Math.min(hi,Math.max(lo,v));
+    const isNumber=v=>typeof v==='number'&&Number.isFinite(v);
+
+    function canvasSetup(canvas){
+      const box=canvas.getBoundingClientRect(),width=Math.max(10,box.width),height=Math.max(10,box.height);
+      const scale=Math.min(devicePixelRatio||1,2);
+      canvas.width=Math.round(width*scale);canvas.height=Math.round(height*scale);
+      const ctx=canvas.getContext('2d');ctx.setTransform(scale,0,0,scale,0,0);
+      return {ctx,w:width,h:height};
+    }
+    function axes(ctx,w,h,{minX,maxX,minY,maxY,xUnit='',yUnit=''}){
+      const rect={l:36,t:12,r:w-12,b:h-28};
+      const dx=Math.max(1e-12,maxX-minX),dy=Math.max(1e-12,maxY-minY);
+      const X=x=>rect.l+(x-minX)/dx*(rect.r-rect.l);
+      const Y=y=>rect.b-(y-minY)/dy*(rect.b-rect.t);
+      ctx.strokeStyle='#254050';ctx.lineWidth=1;ctx.setLineDash([]);
+      ctx.font='10px Segoe UI, Arial';ctx.fillStyle='#8198a9';
+      for(let i=0;i<=3;i++){
+        const y=rect.t+(rect.b-rect.t)*i/3;
+        ctx.globalAlpha=.5;ctx.beginPath();ctx.moveTo(rect.l,y);ctx.lineTo(rect.r,y);ctx.stroke();ctx.globalAlpha=1;
+        const value=maxY-(maxY-minY)*i/3;
+        ctx.textAlign='right';ctx.fillText(Number.isFinite(value)?value.toFixed(Math.abs(value)<10?1:0):'',rect.l-7,y+3);
+      }
+      for(let i=0;i<=3;i++){
+        const x=rect.l+(rect.r-rect.l)*i/3;
+        const value=minX+(maxX-minX)*i/3;
+        ctx.textAlign=i===0?'left':i===3?'right':'center';
+        ctx.fillText(value.toFixed(1)+(i===3?' '+xUnit:''),x,rect.b+17);
+      }
+      return {X,Y,rect};
+    }
+    function drawLine(ctx,points,{color='#5ee3d0',fill=false,rect=null,width=2.3}={}){
+      if(points.length<2)return;
+      ctx.beginPath();ctx.moveTo(points[0][0],points[0][1]);for(let i=1;i<points.length;i++)ctx.lineTo(points[i][0],points[i][1]);
+      if(fill&&rect){const grad=ctx.createLinearGradient(0,rect.t,0,rect.b);grad.addColorStop(0,'#57e8ce3d');grad.addColorStop(1,'#57e8ce03');ctx.lineTo(points[points.length-1][0],rect.b);ctx.lineTo(points[0][0],rect.b);ctx.closePath();ctx.fillStyle=grad;ctx.fill();ctx.beginPath();ctx.moveTo(points[0][0],points[0][1]);for(let i=1;i<points.length;i++)ctx.lineTo(points[i][0],points[i][1]);}
+      ctx.lineWidth=width;ctx.strokeStyle=color;ctx.lineJoin='round';ctx.lineCap='round';ctx.stroke();
+    }
+    function drawEmpty(ctx,w,h,msg){ctx.fillStyle='#708798';ctx.font='12px Segoe UI, Arial';ctx.textAlign='center';ctx.fillText(msg,w/2,h/2);}
+    function drawWave(data){
+      const {ctx,w,h}=canvasSetup($('wavechart'));ctx.clearRect(0,0,w,h);
+      const y=data?.waveform||[];
+      if(y.length<3){drawEmpty(ctx,w,h,'Waiting for waveform…');return;}
+      const minY=Math.min(...y),maxY=Math.max(...y),pad=Math.max(.2,(maxY-minY)*.15);
+      const {X,Y,rect}=axes(ctx,w,h,{minX:-8,maxX:0,minY:minY-pad,maxY:maxY+pad,xUnit:'s'});
+      drawLine(ctx,y.map((v,i)=>[X(-8+i*8/(y.length-1)),Y(v)]),{rect,fill:true});
+    }
+    function drawSpectrum(data){
+      const {ctx,w,h}=canvasSetup($('spectrumchart'));ctx.clearRect(0,0,w,h);
+      const f=data?.spectrum_hz||[],p=data?.spectrum_power||[];
+      if(f.length<3||p.length!==f.length){drawEmpty(ctx,w,h,'Waiting for spectrum…');return;}
+      const ymin=0,ymax=Math.max(...p,0.00001)*1.15;
+      const {X,Y,rect}=axes(ctx,w,h,{minX:f[0],maxX:f[f.length-1],minY:ymin,maxY:ymax,xUnit:'Hz'});
+      drawLine(ctx,f.map((v,i)=>[X(v),Y(p[i])]),{rect,fill:true});
+      if(isNumber(data.expected_hz)&&data.expected_hz>=f[0]&&data.expected_hz<=f[f.length-1]){
+        ctx.save();ctx.setLineDash([4,5]);ctx.strokeStyle='#f5bb6488';ctx.beginPath();ctx.moveTo(X(data.expected_hz),rect.t);ctx.lineTo(X(data.expected_hz),rect.b);ctx.stroke();ctx.restore();
+      }
+      if(isNumber(data.frequency_hz)){
+        const peakIndex=p.reduce((best,val,i)=>Math.abs(f[i]-data.frequency_hz)<Math.abs(f[best]-data.frequency_hz)?i:best,0);
+        ctx.save();ctx.setLineDash([3,4]);ctx.strokeStyle='#59e2d0a0';ctx.beginPath();ctx.moveTo(X(data.frequency_hz),rect.t);ctx.lineTo(X(data.frequency_hz),rect.b);ctx.stroke();ctx.restore();
+        ctx.beginPath();ctx.arc(X(data.frequency_hz),Y(p[peakIndex]),4,0,2*Math.PI);ctx.fillStyle='#9affed';ctx.fill();
+      }
+    }
+    function drawTrend(data){
+      const {ctx,w,h}=canvasSetup($('trendchart'));ctx.clearRect(0,0,w,h);
+      const y=(data?.frequency_history_hz||[]).filter(isNumber);
+      if(y.length<2){drawEmpty(ctx,w,h,'Waiting for frequency history…');return;}
+      const target=data.expected_hz;
+      const values=isNumber(target)?y.concat([target]):y;
+      const lo=Math.min(...values),hi=Math.max(...values),pad=Math.max(.08,(hi-lo)*.28);
+      const {X,Y,rect}=axes(ctx,w,h,{minX:-(y.length-1)*data.update_seconds,maxX:0,minY:Math.max(0,lo-pad),maxY:hi+pad,xUnit:'s'});
+      if(isNumber(target)){ctx.save();ctx.setLineDash([4,5]);ctx.strokeStyle='#f5bb6499';ctx.beginPath();ctx.moveTo(rect.l,Y(target));ctx.lineTo(rect.r,Y(target));ctx.stroke();ctx.restore();}
+      drawLine(ctx,y.map((v,i)=>[X(-(y.length-1-i)*data.update_seconds),Y(v)]),{rect,fill:true});
+    }
+    function render(data){
+      latest=data;
+      $('mode').textContent=safe(data.mode);$('mode').dataset.mode=safe(data.mode);
+      const hz=data.frequency_hz;
+      $('frequency').innerHTML=(isNumber(hz)?hz.toFixed(3):'—')+'<span class="unit">Hz</span>';
+      $('frequency').classList.toggle('is-empty',!isNumber(hz));
+      $('equivalent').textContent=num(data.rate_equivalent_cpm,1);
+      $('signalstatus').textContent=safe(data.status,'WAITING FOR CSI');
+      $('signalstatus').className='indicator'+(data.status==='LIVE'?'':data.status==='MEASURING'||data.status==='WARMING UP'?' warn':' bad');
+      $('expected').textContent=isNumber(data.expected_hz)?num(data.expected_hz,2)+' Hz':'not set';
+      $('errorhz').textContent=isNumber(data.error_hz)?num(data.error_hz,3)+' Hz':'—';
+      $('comparison').textContent=safe(data.comparison);
+      $('comparison').className='outcome'+(data.comparison==='MATCH'?' good':'');
+      $('pmr').innerHTML=num(data.peak_to_median,1)+' <span class="bigsmall">×</span>';
+      $('pmrdb').innerHTML=num(data.peak_to_median_db,1)+' <span class="bigsmall">dB</span>';
+      const supported=data.supported_subcarriers,usable=data.usable_subcarriers;
+      const pct=usable>0?100*supported/usable:0;
+      $('support').textContent=usable>0?supported+' / '+usable:'— / —';
+      $('supportpct').textContent=usable>0?num(pct,0)+'%':'—%';
+      $('supportbar').style.width=clamp(pct,0,100)+'%';
+      $('rate').textContent=num(data.packet_rate,1)+' pkt/s';
+      $('bw').textContent=safe(data.bandwidth_mhz)+' MHz';
+      $('packets').textContent=count(data.packets_decoded);
+      $('errors').textContent=count(data.decode_errors);
+      $('coverage').textContent=num(data.coverage_pct,0)+'%';
+      $('window').textContent=num(data.window_filled_seconds,1)+' / '+num(data.window_seconds,0)+' s';
+      $('recording').textContent=data.recording?'● Recording '+count(data.recorded_frames)+' frames':'Recorder OFF';
+      $('recording').className=data.recording?'meta recording':'meta';
+      $('sc').textContent='Subcarrier '+safe(data.best_subcarrier);
+      $('peaks').textContent=(data.top_peaks_hz||[]).length?'Top peaks: '+data.top_peaks_hz.map(x=>num(x,3)+' Hz').join(' · '):'Top peaks: waiting for enough CSI data';
+      const cs=data.core_stream||[];
+      $('detail').textContent='Core/stream: '+(cs.length?cs.join('/'):'auto')+' · Sampling '+num(data.timestamp_fs,1)+' Hz · Gap '+num(data.max_gap_ms,0)+' ms';
+      drawWave(data);drawSpectrum(data);drawTrend(data);
+    }
+    function connection(ok,msg){$('dot').className='statusdot '+(ok?'online':'bad');$('connection').textContent=msg;}
+    async function poll(){
+      if(requestInProgress)return;
+      requestInProgress=true;
+      const ctl=new AbortController();const timeout=setTimeout(()=>ctl.abort(),2500);
+      try{
+        const res=await fetch('/api/status',{cache:'no-store',signal:ctl.signal});if(!res.ok)throw new Error('HTTP '+res.status);
+        const data=await res.json();if(data.error)throw new Error(data.error);
+        lastGoodAt=Date.now();render(data);
+        connection(true,'Connected to Raspberry Pi');
+      }catch(err){
+        connection(false,'Disconnected · Reconnecting…');
+        $('signalstatus').textContent='CONNECTION LOST';$('signalstatus').className='indicator bad';
+        // Never show an old frequency as a current live measurement.
+        $('frequency').innerHTML='—<span class="unit">Hz</span>';
+        $('equivalent').textContent='—';
+        $('age').textContent='No live data';
+      }finally{clearTimeout(timeout);requestInProgress=false;}
+    }
+    setInterval(()=>{
+      if(!lastGoodAt)return;
+      const age=(Date.now()-lastGoodAt)/1000;
+      $('age').textContent='Updated '+Math.floor(age)+'s ago';
+      if(age>5){connection(false,'Data feed is stale');$('signalstatus').textContent='DATA STALE';$('signalstatus').className='indicator bad';$('frequency').innerHTML='—<span class="unit">Hz</span>';$('equivalent').textContent='—';}
+    },700);
+    window.addEventListener('resize',()=>{if(latest){drawWave(latest);drawSpectrum(latest);drawTrend(latest);}});
+    poll();setInterval(poll,1000);
+  })();
+  </script>
+</body>
+</html>

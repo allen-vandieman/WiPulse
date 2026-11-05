@@ -1,0 +1,8 @@
+*.csv
+*.pcap
+/old/app/results
+/old/app/output
+/research
+/delta/captures
+/delta/__pycache__
+/echo/__pycache__

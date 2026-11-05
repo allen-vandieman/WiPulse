@@ -1,0 +1,41 @@
+WiPulse CSI-Heart — browser dashboard
+====================================
+
+Put these two files in the SAME directory as your existing decoder.py:
+  servo_frequency_monitor.py
+  servo_dashboard.html
+
+On the Raspberry Pi:
+  cd ~/work/WiPulse/falcon
+  sudo python3 servo_frequency_monitor.py --iface wlan0 --chip 43455c0 --bw 20 --expected-hz 1.0
+
+Check Pi LAN address (from another Pi terminal):
+  hostname -I
+
+On Windows (same LAN), open:
+  http://<RASPBERRY_PI_IP>:8080
+
+A URL also appears in the Pi monitor when web mode starts. The browser updates
+approximately every second; no Python or extra dashboard packages on Windows.
+
+Use --web-port 8081 if port 8080 is already busy.
+Use --web-host 127.0.0.1 to restrict the page to Pi localhost (for SSH tunnels).
+Use --no-web to disable the browser dashboard.
+Use --no-ui to run without the curses terminal display, keeping the browser active.
+
+If Pi cannot be reached from Windows but SSH works, create an SSH tunnel in a
+Windows terminal (substitute your actual Pi IP):
+  ssh -L 8080:localhost:8080 allen@<RASPBERRY_PI_IP>
+Then browse http://localhost:8080. The SSH terminal must remain open.
+
+The Pi must be running the monitor for the browser dashboard to receive data.
+The browser is read-only; recording is controlled using C in the Pi monitor
+(or start with --record-on-start).
+The server binds to 0.0.0.0 by default: anyone who can reach TCP port 8080
+can view the dashboard. Do not expose it to the public Internet.
+
+Synthetic rehearsal (not actual Wi-Fi CSI sensing):
+  python3 servo_frequency_monitor.py --simulate --bw 20 --simulate-hz 1.0 --expected-hz 1.0
+  Open http://<RASPBERRY_PI_IP>:8080
+
+The displayed cycles/min value is Hz x 60, NOT a medically validated heart rate.
