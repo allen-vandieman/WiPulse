@@ -96,7 +96,7 @@ Raw capture
 sudo tcpdump -i wlan0 udp port 5500 -w csi_capture.pcap
 ```
 
-or use [app](/echo/README.md).
+or use the [FALCON application](/falcon/README.md).
 
 ```bash
 cd ~/work

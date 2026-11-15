@@ -1,270 +1,205 @@
 # WiPulse
 
-WiPulse - Contactless Vital Sign Extraction
-
-1. [Setup](/setup/README.md)
-1. [Extraction App](/echo/README.md)
-
-- Current Problems
-
-1. [Current Problems](/plans/current_problems.md)
-
-- Old Plans
-
-1. [HR Pipeline plan](/plans/old/plan.md)
-1. [another Pipeline plan](/plans/old/another_plan.md)
-1. [rough Pipeline plan](/plans/old/rough.md)
-
-## Contents
-
-1. [Brief](#brief)
-1. [Goals](#goals)
-1. [Drawing](#drawing)
-1. [Progress](#progress)
-1. [Learming thus far](#learning-thus-far)
-    1. [OSI Model](#osi-model)
-    1. [Hardware](#hardware)
-    1. [Frames](#frames)
-    1. [Channels](#channels)
-        1. [Why 80 MHz](#what-does-80-mhz-actually-give-you)
-        1. [Summary](#summary)
-    1. [Channel Information](#channel-information)
-        1. [channels in ZA](#possible-5g-channels-in-za-south-africa)
-    1. [Filters](#filters)
-
-
-## Brief
-
-Contact-based vital-sign extraction, while reliable, is uncomfortable, non
-portable, and impractical in many situations — particularly for infants and 
-elderly individuals. This project proposes WiPulse, a contactless vital-sign 
-extraction system that uses Wi-Fi Channel State Information (CSI) to 
-monitor heart rate without physical contact. Rather than relying on 
-hardware that is difficult to source, such as the Intel 5300 NIC, the system 
-uses an ESP32 — a low-cost, readily available IoT device — to extract CSI 
-amplitude data. A Raspberry Pi 5 serves as the processing platform, where 
-Fourier transforms and Fourier series are applied to convert the extracted 
-signals from the time domain to the frequency domain, and noise is filtered 
-from the resulting data. A Long Short-Term Memory (LSTM) machine 
-learning model is then trained using ground-truth heart-rate readings 
-obtained from a PPG optical sensor and smartwatch. The processed output 
-is displayed on a screen and delivered through a web API for mobile 
-monitoring. This project demonstrates that contactless vital-sign extraction 
-is achievable using minimal, affordable, and commercially available 
-consumer hardware, offering a less intrusive alternative for monitoring 
-vulnerable individuals. 
-
-## Goals
-
-![Goals](/img/goals.png)
-
-1. Use consumer of the shevle IOT devices
-2. Patch firmware to allow (a) transmission and (b) capture  of raw frames on (c) any channel
-3. Extract Received Signal Strength Indicator (RSSI) and  Channel State Information (CSI)
-4. Transform CSI data in a meaningful way
-5. Process CSI data to extract usefull information
-6. Output or display data in a userfriendly way
-
-## Drawing
-
-![Drawing](img/Wi-Pulse_Drawing-V2.png)
-
-## Progress
-
-Progress thus far:
-
-![Progress](img/Progress.jpg)
-
-- Setup
-
-1. [Setup](/setup/README.md)
-1. [Extraction App](/app/README.md)
-
-- Notes
-
-1. [TX](/notes/tx/README.md)
-1. [RX](/notes/rx/README.md)
-1. [Extraction](/notes/extraction.md)
-1. [channels](/notes/channels.md)
-
-## Learning Thus Far
-
-### OSI Model
-Looking at the OSI model, working only with Application and media layers. Use and App to create frames.
-![Progress](img/capture_work/OSI%20model.jpg)
-
-### Hardware
-How the OS uses drivers to interface firmware that use hardware
-![Progress](img/capture_work/Flash.jpg)
-Details
-![Progress](img/capture_work/description.png)
-
-- Why i pathch firmware and drivers
-![Progress](img/capture_work/work.PNG)
-
-- Result
-![Progress](img/capture_work/workflow.png)
-
-### Frames
-
-How my frames are created
-![Progress](img/capture_work/frames2air.png)
-
-How my frames are placed on the air
-![Progress](img/capture_work/frames2air2scripts.png)
-
-### Channels
-
-For 5 GHz Wi-Fi, if you configure:
-
-Primary channel: 36
-Channel width: VHT80 (80 MHz)
-
-then you are using 4 contiguous 20 MHz channels:
-
-**Channel 36 (5180 MHz)**
-
-**Channel 40 (5200 MHz)**
-
-**Channel 44 (5220 MHz)**
-
-**Channel 48 (5240 MHz)**
-
-How many channels are you using?
-
-4 x 20 MHz channels combined into one 80 MHz channel.
-
-What is the center frequency?
-
-The center frequency is halfway across the 80 MHz block:
-
-5180 MHz + 30 MHz = 5210 MHz 
-
-So the center frequency is 5210 MHz.
-
-#### What does 80 MHz actually give you?
-
-Think of bandwidth like this:
-
-| Bandwidth | Approx. useful OFDM subcarriers | CSI size |
-|--|:--:|--|
-|20 MHz| ~64 |	Small|
-|40 MHz| ~128 |	Medium|
-|80 MHz| ~256 |	Large|
-
-#### Summary
-
-| Setting |	Value |
-|--|--|
-| Primary channel |	36 |
-| Width |	VHT80 (80 MHz) |
-| 20 MHz channels used |	36, 40, 44, 48 |
-| Frequency range |	5180 MHz to 5260 MHz |
-| Center frequency |	5210 MHz |
-
-
-In 802.11ac/ax terminology, this is the 80 MHz channel block centered at 5210 MHz (often referred to as the channel group 36-48).
-
-### Channel Information
-
-#### Possible 5G channels in ZA (South Africa)
-| Setting | Info |
-|--|--|
-| 80MHZ | 36 , 44  , 100 , 108 , 116 , 124 |
-| 20MHz | 40 , 48 , 104 , 112 , 120 , 128 , 136 |
-| HT20 | 20 MHz channel. Typical PHY rate: up to ~72–150 Mbps per stream. |
-| HT40+ | Uses 40 MHz by bonding two adjacent 20 MHz channels. |
-||       // Primary channel is the lower one. Secondary channel is above (+).|
-|HT40- | Primary channel is the upper one. Secondary channel is below (-). |
-| Example||
-| HT40- | usually means channels 36+40. |
-| HT40+ | usually means channels 40+44. |
-| VHT80  | Uses 80 MHz total width. Bonds four 20 MHz channels.|
-|| Requires 802.11ac support.|
-| 80 MHz | These are often used interchangeably.|
-| Example ||
-| 80 MHz | channel width.|
-| VHT80 | 802.11ac mode using an 80 MHz width.|
-
-### Filters
-
-Cardiac range is ~0.5–3.7 Hz (30–220 BPM), so you'd want butterworth_bandpass(amp, low_hz=0.8, high_hz=3.5, fs_hz=dataset.fs_est) on a per-subcarrier or PCA-combined signal — heartbeat's amplitude signature in CSI is much subtler than walking, so single-subcarrier variance analysis will likely be noisy. Common approach: bandpass each subcarrier, then pick/average the ones with the strongest SNR in that band (or PCA across subcarriers first, then bandpass the principal component).
-
-The 100 Hz sender is plenty for Nyquist (need >~7.4 Hz for 220 BPM), so sample rate isn't the bottleneck — signal quality/placement will be.
-
-The Nyquist Rate: This is the minimum sampling speed required to avoid distortion. For example, because human hearing tops out at about 20,000 Hz, digital audio is typically sampled at 44,100 Hz (or 44.1 kHz) to perfectly capture all audible frequencies.
-
-The Nyquist Frequency (or Folding Frequency): This is exactly half of the sampling rate. Any frequency present in the original signal that is higher than the Nyquist frequency will "fold" over and cause distortion in the digital version. This phenomenon is known as aliasing.
-
-![Nyquist](img/processing/Nyquist.PNG)
-
-#### Hampel filter
-
-Removes outliers
-
-Statistical method used to detect and remove outliers in time series data or signals. It uses a moving sliding window, calculates the local median and *Median Absolute Deviation* (MAD), and replaces points that fall outside a set threshold with the median.
-
-`How the Window Works`
-
-- Center Point: The code looks at the current data point in the middle of the window.
-
-- Neighbors: It grabs k points before and k points after the center point.
-
-- Total Size: The window length equals 2k + 1 total samples.
-
-- Sliding Action: The window moves one step forward along the dataset until it checks every point.
-
-#### Notch filter
-
-A notch filter is a type of **band-stop filter** with a very narrow stopband and *high* **Q factor**. 
-
-It blocks or heavily attenuates a single specific frequency or a tiny range of frequencies, while letting all other frequencies pass through completely unchanged.
-
-![band stop](img/processing/Band-Reject_Filter.svg.jpg)
-
-Bandstop filter is a lowpass + highpass
-
-low  pass -> RC
-high pass -> CR
-
-notch filter ->	apply hampel filter
-
-Q (quality factor)
-BW (bandwidth)
-f (Operating frequency)
-
-BW = f / Q
-
-Higher Q → narrower notch
-Lower Q → wider notch
-
-####  Butterworth bandpass filter
-
-third-order -> amount of poles (capacitors)
-
-![Savitzky-Golay](img/processing/Butterworth-filters-ideal-response-6_Q320.jpg)
-
-#### Savitzky-Golay filtering
-
-a digital smoothing and filtering method that fits a low-degree polynomial to a sliding window of data points using linear least squares. It removes high-frequency noise from a signal while better preserving peak heights, widths, and high-frequency details compared to standard moving average filters.
-
-![Savitzky-Golay](img/processing/Savitzky-Golay.jpg)
-
-### Test processing pipeline
-
-After successfully setting up a processing pipeline, an next step is to test the pipeline with a synthetically generated CSI data, where i know what is expected and see what the pipeline produce.
-
-Ideally our goals should be:
-
-![Output graph](img/processing/diagnose_psd-72-lossy.png)
-
-THe image above is an example output where we can see the detected heart rate and ground truth data are within a 3 BPM error. We can also see a clear bump near the HR and a very good SNR.
-
-### Harmonics
-
-Harmonics are any frequencies that are integer (whole-number) multiples of a base fundamental frequency.
-
-**Harmonic Distortion and Noise**
-
-When a perfect sine wave signal passes through an imperfect or "non-linear" system (like an overdriven amplifier or a saturated transformer), the output signal gets squashed or distorted. This distortion creates unwanted new frequencies at harmonic intervals.
-
+## Contactless heart-rate sensing with Wi-Fi Channel State Information
+
+WiPulse is an engineering research prototype that investigates whether small,
+periodic body movement associated with a heartbeat can be detected from changes
+in Wi-Fi Channel State Information (CSI), without attaching the sensing device
+to the person. The repository contains the capture software, CSI decoder,
+signal-processing experiments, and setup notes used to build and evaluate the
+prototype.
+
+> **Research prototype only.** WiPulse is not a medical device and does not
+> provide clinically validated heart-rate measurements. Results depend on the
+> recording conditions and must be checked against an independent reference.
+
+## Project at a glance
+
+Wi-Fi signals reflect and scatter as they travel between devices. Movement in
+the environment changes the measured radio channel. CSI records the complex
+response—amplitude and phase—of multiple Wi-Fi subcarriers, allowing those
+changes to be examined over time. WiPulse captures CSI, processes it to find
+periodic components, and compares candidate heart-rate estimates with
+independently recorded pulse readings.
+
+The project began with a broader concept involving ESP32 hardware, machine
+learning, and a mobile interface. The completed proof of concept instead uses
+two Raspberry Pi 5 devices and Nexmon CSI on the receiver. Its validated work
+focuses on acquisition, signal processing, and comparison with reference data;
+an LSTM model and mobile application are not part of the completed system.
+
+### Project goals
+
+- Build a CSI sensing chain from accessible, reusable Wi-Fi hardware.
+- Capture and validate timestamped CSI data at a rate suitable for analysing
+  heartbeat-range periodic signals.
+- Demonstrate sensitivity to known motion, then investigate human recordings
+  using an independent pulse-sensor reference.
+- Compare signal representations and processing methods rather than treating
+  every spectral peak as a heart-rate measurement.
+
+## System overview
+
+```mermaid
+flowchart LR
+    TX["Raspberry Pi transmitter<br/>controlled Wi-Fi frames"] --> RF["5 GHz Wi-Fi channel<br/>example: 80 MHz"]
+    RF --> RX["Raspberry Pi receiver<br/>Nexmon CSI"]
+    RX --> CAP["CSI capture<br/>UDP / PCAP / CSV"]
+    CAP --> DEC["Decode complex I/Q<br/>amplitude and phase"]
+    DEC --> DSP["Filtering and subcarrier selection<br/>FFT / Welch PSD"]
+    DSP --> HR["Candidate periodic frequency<br/>and BPM estimate"]
+    REF["Arduino Uno R4 WiFi<br/>pulse-sensor reference"] -. "time-aligned comparison" .-> DSP
+```
+
+In the report's representative 80 MHz capture configuration, each valid packet
+contains 256 complex subcarrier values. Example optimised recordings approached
+100 packets per second. The documented 5 GHz channel-36/80 MHz configuration
+uses the bonded 36–48 channel group, centred at 5210 MHz; select channels and
+widths only where permitted by the local regulatory domain.
+
+### Hardware and software
+
+| Component | Role |
+|---|---|
+| Raspberry Pi 5 transmitter | Sends controlled Wi-Fi frames to create repeatable traffic. |
+| Raspberry Pi 5 receiver with compatible Broadcom Wi-Fi hardware | Runs Nexmon CSI to capture channel measurements. The active monitor defaults to chip `43455c0`. |
+| Arduino Uno R4 WiFi and pulse sensors | Records reference heart-rate readings over serial for comparison with CSI. The project documentation describes DFRobot sensors, including an optical MAX30102 reference. |
+| Python processing tools | Decode captures, inspect signal quality, filter and analyse CSI, and compare estimates with reference readings. |
+
+## Processing workflow
+
+The principal analysis path is:
+
+1. Transmit known Wi-Fi frames and collect timestamped CSI packets.
+2. Decode CSI payloads into complex subcarrier values; inspect packet timing,
+   sequence gaps, and capture quality.
+3. Derive amplitude and phase representations; clean outliers and filter
+   candidate signals.
+4. Rank and fuse responsive subcarriers, then estimate periodic components
+   using time-domain peaks and frequency-domain FFT/Welch PSD analysis.
+5. Convert candidate frequency to BPM and compare time-aligned results with
+   the pulse-sensor reference.
+
+The project evaluated amplitude, phase, common-phase removal, phase
+differences, and amplitude/phase combinations. The active live monitor uses a
+rolling CSI window, periodically updates estimates, and includes occupancy,
+motion, signal-quality, and heart-rate stabilisation logic.
+Its default live heart-rate search band is 0.7–2.5 Hz (42–150 BPM). The
+processing path includes Hampel outlier filtering, a Butterworth band-pass,
+drift removal, subcarrier fusion, and Welch PSD estimation. At the observed
+capture rates, sampling frequency is not the main limitation; reliable
+heart-rate signal quality is.
+
+## Experimental results
+
+The project used a controlled servo-and-foil experiment to verify that motion
+can affect CSI before interpreting human recordings. It then evaluated human
+CSI recordings against timestamped PPG reference readings.
+
+| Evaluation | Reported evidence | Interpretation |
+|---|---|---|
+| CSI acquisition | A representative timing diagnostic measured about 97.3 packets/s; example optimised runs reported 0.43% and 0.64% packet loss. | Capture targets were achieved in those runs; performance can vary with conditions. |
+| Controlled motion | A servo moving at about 0.5 Hz produced visible periodic CSI components, including a harmonic near 1.49 Hz (about 89.4 cycles/min). | Demonstrates motion sensitivity. The harmonic is **not** a human heart-rate result. |
+| Human recordings | Seven recordings comprising 91,856 packets were processed. Selected results included 0.99 BPM MAE for one accepted amplitude evaluation window and a selected phase result of 6.93 BPM MAE. | Promising individual comparisons with the reference, not a population-wide accuracy claim. |
+| Across-recording comparison | The report gives mean capture MAE values of approximately 28.11 BPM for amplitude and 17.82 BPM for phase across the seven recordings. | Shows substantial variability and that a strong individual result does not represent typical performance. |
+| Synthetic pipeline test | Project notes report under 3 BPM error with up to 15% simulated packet loss. | Tests the analysis pipeline with known input; it is not evidence of human-sensing accuracy. |
+
+The results support proof-of-concept feasibility, not a general-purpose monitor.
+Reference readings, participant placement, motion, multipath, and subcarrier
+selection can all affect an estimate. A spectral peak by itself is not evidence
+that the signal came from a heartbeat. The proposal's acquisition goals were
+more than 50 packets/s and less than 5% packet loss; representative runs met
+those goals. Its approximately ±5 BPM heart-rate and machine-learning targets
+were not established across the seven recordings, and the machine-learning
+stage was not implemented. Repository troubleshooting notes also document
+real captures with low quality scores and flat PSDs, so repeatable signal
+quality remains an open experimental challenge. The report records that the
+prototype reused existing equipment and incurred R0 in new project expenditure.
+
+## Quick start
+
+### Requirements
+
+- Raspberry Pi/Linux hardware suitable for Nexmon CSI capture, with compatible
+  Wi-Fi hardware and patched firmware installed.
+- A configured transmitter and receiver on an appropriate channel.
+- Python 3 and the packages listed in
+  [`falcon/requirements.txt`](falcon/requirements.txt).
+- Root/network-capture permissions for live CSI reception.
+
+First complete the hardware, firmware, and radio configuration in the
+[setup guide](setup/README.md) and the [receiver notes](notes/rx/README.md).
+Those steps are necessary; installing the Python requirements alone does not
+enable CSI capture.
+
+From the repository root on the Raspberry Pi:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r falcon/requirements.txt
+cd falcon
+sudo ../.venv/bin/python live_monitor.py \
+  --iface wlan0 \
+  --chip 43455c0 \
+  --bw 80 \
+  --capture-mode complex
+```
+
+The live monitor uses the complex capture mode by default, which preserves
+amplitude and phase for later analysis. Use `c` to start or stop recording and
+`q` to quit. For other chip identifiers, bandwidths, and processing options,
+see the [FALCON application guide](falcon/README.md).
+
+### Servo-frequency dashboard demo
+
+`servo_frequency_monitor.py` provides a separate motion-frequency monitor with
+a browser dashboard. To rehearse the interface without Wi-Fi hardware, run
+from `falcon/`:
+
+```bash
+python servo_frequency_monitor.py \
+  --simulate \
+  --bw 20 \
+  --simulate-hz 1.0 \
+  --expected-hz 1.0
+```
+
+Synthetic input is a software demonstration, not a sensor measurement. The
+dashboard binds to all network interfaces by default; keep it on a trusted
+local network, do not port-forward it, and use `--web-host 127.0.0.1` to
+restrict it to the Pi.
+
+## Repository guide
+
+| Path | Contents |
+|---|---|
+| [`falcon/`](falcon/) | Active capture and analysis tools: live monitor, CSI decoder, filters, heartbeat extraction, serial reference recorder, validation scripts, and servo dashboard. |
+| [`setup/`](setup/) | CSI setup notes and Wi-Fi transmitter scripts. |
+| [`notes/`](notes/) | Hardware, transmitter/receiver, extraction, channel, filtering, frequency-analysis, and [reorganized project background](notes/project-notes.md). |
+| [`img/`](img/) | Project diagrams, hardware photographs, and signal-processing figures. |
+| [`plans/`](plans/) | Development notes and known issues. |
+| [`old/`](old/) | Earlier experimental implementations; not the recommended starting point. |
+
+Useful references: [hardware](notes/hardware.md) ·
+[transmitter](notes/tx/README.md) · [receiver](notes/rx/README.md) ·
+[CSI extraction](notes/extraction.md) · [channels](notes/channels.md) ·
+[filters](notes/filters.md) ·
+[frequency-domain analysis](notes/frequency_domain_analysis.md) ·
+[FFT vs. PSD](<notes/FFT VS PSD.md>) · [known issues](plans/current_problems.md).
+
+Raw `.pcap` and `.csv` captures are ignored by Git; the repository contains the
+software and documentation, not the experimental datasets.
+
+## Responsible use and licensing
+
+Wi-Fi sensing can reveal information about a person's presence or movement.
+Collect data only with appropriate consent, protect recorded CSI and reference
+measurements, and follow local radio-frequency regulations. Do not use WiPulse
+for diagnosis or medical decisions.
+
+There is currently no `LICENSE` file in this repository. Making the repository
+public makes the source visible, but does not by itself grant permission to
+reuse, modify, or redistribute it. Add a license if you intend to grant those
+permissions.

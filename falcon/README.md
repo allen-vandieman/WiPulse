@@ -22,14 +22,14 @@
 ## Application
 
 ```
-echo/
-├── live_monitor.py                         # Main dashboard (UPDATED with integration)
-├── heartbeat_extraction.py                 # Enhanced with occupancy/motion (UPDATED)
-├── filters.py                              # CSI filtering utilities (unchanged)
-├── decoder.py                              # CSI decoding (unchanged)
-├── pi_serial_recorder.py                   # Ground truth recording (unchanged)
-├── servo_frequency_monitor.py              # View dominant frequency on CSI data
-├── servo_frequency_monitor_debug.py        # View dominant frequency on CSI data debugger
+falcon/
+├── live_monitor.py                         # Live CSI monitor and heart-rate estimates
+├── heartbeat_extraction.py                 # Offline and live heartbeat analysis
+├── filters.py                              # CSI filtering utilities
+├── decoder.py                              # CSI decoding
+├── pi_serial_recorder.py                   # Ground-truth recording
+├── servo_frequency_monitor.py              # Servo-motion frequency monitor and dashboard
+├── servo_frequency_monitor_debug.py        # Capture diagnostics for the servo monitor
 └── output/                     # Output directory
 ```
 
